@@ -150,7 +150,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Local auth setup only
   await setupLocalAuth(app);
 
-  // Note: /api/auth/user is implemented later with hybrid auth support
+  // Return 404 for old Replit Auth routes
+  app.get('/api/login', (req, res) => {
+    res.status(404).json({ 
+      message: "Esta ruta ya no está disponible. Usa la autenticación local.", 
+      redirectTo: "/" 
+    });
+  });
+
+  app.get('/api/callback', (req, res) => {
+    res.status(404).json({ 
+      message: "Esta ruta ya no está disponible. Usa la autenticación local.", 
+      redirectTo: "/" 
+    });
+  });
 
   // Chat routes
   app.post('/api/chat', isAuthenticated, async (req: Request, res: Response) => {
