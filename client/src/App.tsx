@@ -15,11 +15,25 @@ function Router() {
   const { isAuthenticated, isLoading } = useAuth();
   const [location] = useLocation();
 
-  // Debug logging for problematic routes
+  // Debug logging for problematic routes  
   useEffect(() => {
     if (location && !['/', '/gallery', '/account'].includes(location)) {
-      console.warn('Unknown route accessed:', location);
+      console.warn('❌ Unknown route accessed:', location);
+      console.trace('Route access stack trace:');
     }
+  }, [location]);
+
+  // Monitor scroll events that might trigger navigation
+  useEffect(() => {
+    const handleScroll = (event: Event) => {
+      // Log any scroll events that happen when we're at an unknown route
+      if (location && !['/', '/gallery', '/account'].includes(location)) {
+        console.warn('❌ Scroll event during unknown route:', location, event.target);
+      }
+    };
+
+    window.addEventListener('scroll', handleScroll, true);
+    return () => window.removeEventListener('scroll', handleScroll, true);
   }, [location]);
 
   // Show loading state during authentication check

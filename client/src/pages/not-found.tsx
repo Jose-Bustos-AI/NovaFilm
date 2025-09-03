@@ -8,12 +8,13 @@ export default function NotFound() {
   const [, navigate] = useLocation();
 
   useEffect(() => {
-    // Auto-redirect to home after 3 seconds to avoid persistent 404s
-    const timer = setTimeout(() => {
+    // Immediate redirect for scroll-triggered 404s
+    const immediateTimer = setTimeout(() => {
+      console.log('🔄 NotFound: Immediate redirect to home');
       navigate('/');
-    }, 3000);
+    }, 100);
 
-    return () => clearTimeout(timer);
+    return () => clearTimeout(immediateTimer);
   }, [navigate]);
 
   return (
