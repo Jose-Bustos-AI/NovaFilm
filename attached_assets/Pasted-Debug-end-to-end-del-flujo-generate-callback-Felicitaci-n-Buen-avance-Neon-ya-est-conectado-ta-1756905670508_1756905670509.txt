@@ -1,0 +1,73 @@
+Debug end-to-end del flujo generate → callback
+
+Felicitación
+Buen avance: Neon ya está conectado, tablas listas y migradas. Persistencia real activa. Vamos a asegurar que cada generación se inserte y que el callback actualice a READY.
+
+Contexto
+Los vídeos siguen en Processing aunque Kie ya consumió créditos. Esto apunta a que el callback no aterriza: o bien no llega a /api/veo-callback, o bien falla al encontrar el taskId. Necesitamos trazabilidad completa.
+
+Regla de oro
+No toques nada de lógica que ya funciona bien en UI. Concéntrate en: insertar siempre el job+video al crear, loguear payload del callback, y reconciliar taskId exacto.
+
+Instrucciones
+
+Log en /api/create-job
+
+Después de insertar en DB, loggea:
+
+{ 
+  "stage": "create-job", 
+  "userId": "<uuid>", 
+  "taskId": "<taskId>", 
+  "promptLength": <n>, 
+  "model": "veo3_fast" 
+}
+
+
+Verifica que jobs y videos quedan insertados en Neon.
+
+Log en /api/veo-callback
+
+Al recibir callback, loggea payload crudo completo (JSON.stringify(req.body)).
+
+Luego loggea si encuentra o no el taskId en DB:
+
+{ 
+  "stage": "callback", 
+  "taskId": "<taskId>", 
+  "foundJob": true|false, 
+  "updatedVideo": true|false 
+}
+
+
+Upsert idempotente por taskId
+
+Si encuentra job → actualiza a READY.
+
+Si no → inserta nuevo job+video con status READY (pero marca user_id = NULL o “orphan”).
+
+Healthcheck extra
+
+Crea GET /api/debug/jobs que devuelva los últimos 5 registros de jobs y videos (solo en NODE_ENV=development).
+
+Así verificamos rápido si los datos aterrizan.
+
+Prueba práctica
+
+Después del deploy, dispara un nuevo vídeo.
+
+Confirma en Neon si aparece fila en jobs y videos.
+
+Espera callback → debería actualizar status=READY y provider_video_url.
+
+Si no, el log del callback mostrará el problema.
+
+Criterios de aceptación
+
+Cada generación crea fila en jobs y videos con el taskId de Kie.
+
+Callback deja trazas claras en logs con payload recibido.
+
+status pasa a READY y videos.provider_video_url se llena.
+
+/api/debug/jobs devuelve registros correctos.

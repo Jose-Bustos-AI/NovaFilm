@@ -7,7 +7,7 @@ import { kieService } from "./services/kie";
 import { createJobSchema, users, jobs, videos } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
-import { sql } from "drizzle-orm";
+import { sql, desc } from "drizzle-orm";
 import { db } from "./db";
 
 const rateLimit = new Map<string, { count: number; resetTime: number }>();
@@ -116,9 +116,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const taskId = `veo_task_${randomUUID()}`;
       const callBackUrl = `${process.env.APP_BASE_URL || `https://${req.hostname}`}/api/veo-callback`;
       
-      // Structured logging
-      console.log(`[CREATE-JOB] userId: ${userId}, taskId: ${taskId}, model: veo3_fast, aspectRatio: ${validatedData.aspectRatio}, promptLength: ${validatedData.prompt.length}`);
-
       // Create job and video records
       await storage.createJob({
         userId,
@@ -131,6 +128,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         taskId,
         prompt: validatedData.prompt,
       });
+      
+      // Structured logging after successful DB insert
+      console.log(JSON.stringify({
+        stage: "create-job",
+        userId: userId,
+        taskId: taskId,
+        promptLength: validatedData.prompt.length,
+        model: "veo3_fast"
+      }));
 
       // Call Kie.ai API
       try {
@@ -152,6 +158,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await storage.updateJobTaskId(taskId, kieTaskId);
         await storage.updateVideoTaskId(taskId, kieTaskId);
         await storage.updateJobStatus(kieTaskId, 'PROCESSING');
+        
+        // Log successful job and video creation in DB
+        console.log(JSON.stringify({
+          stage: "create-job-db-success",
+          originalTaskId: taskId,
+          kieTaskId: kieTaskId,
+          userId: userId
+        }));
 
         res.json({
           run_id: kieResponse.data.runId,
@@ -181,13 +195,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Callback route for Kie.ai - idempotent handling
   app.post('/api/veo-callback', async (req: Request, res: Response) => {
     try {
+      // Log raw callback payload first
+      console.log('[VEO-CALLBACK-RAW] Received payload:', JSON.stringify(req.body));
+      
       const callbackData = kieService.parseCallback(req.body);
       const { taskId, info, fallbackFlag } = callbackData.data;
       
       // Trim and normalize taskId
       const normalizedTaskId = taskId.trim();
       
-      console.log(`[VEO-CALLBACK] Received callback for taskId: ${normalizedTaskId}`);
+      console.log(`[VEO-CALLBACK] Processing taskId: ${normalizedTaskId}`);
 
       // Check if job exists
       let job = await storage.getJob(normalizedTaskId);
@@ -237,12 +254,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
       
-      console.log(`[VEO-CALLBACK] Processed - taskId: ${normalizedTaskId}, foundJob: ${foundJob}, updatedVideo: ${updatedVideo}`);
+      // Structured callback logging
+      console.log(JSON.stringify({
+        stage: "callback",
+        taskId: normalizedTaskId,
+        foundJob: foundJob,
+        updatedVideo: updatedVideo
+      }));
 
       res.status(200).json({ message: "Callback processed successfully" });
     } catch (error) {
       console.error("[VEO-CALLBACK] Processing error:", error);
       res.status(200).json({ message: "Callback received but processing failed" });
+    }
+  });
+
+  // Debug route for development
+  app.get('/api/debug/jobs', async (req: Request, res: Response) => {
+    try {
+      // Only available in development
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(404).json({ message: 'Not found' });
+      }
+      
+      // Get last 5 jobs and videos
+      const recentJobs = await db
+        .select()
+        .from(jobs)
+        .orderBy(desc(jobs.createdAt))
+        .limit(5);
+        
+      const recentVideos = await db
+        .select()
+        .from(videos)
+        .orderBy(desc(videos.createdAt))
+        .limit(5);
+      
+      res.json({
+        jobs: recentJobs,
+        videos: recentVideos,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Debug jobs error:', error);
+      res.status(500).json({ error: 'Failed to fetch debug data' });
     }
   });
 
