@@ -583,7 +583,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Video management routes
   app.get('/api/videos', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       const videos = await storage.getUserVideos(userId);
       res.json(videos);
     } catch (error) {
@@ -595,7 +595,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/videos/:id', isAuthenticated, async (req: any, res: Response) => {
     try {
       const { id } = req.params;
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       
       const video = await storage.getVideo(id);
       if (!video) {
@@ -616,7 +616,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/videos/:id/download', isAuthenticated, async (req: any, res: Response) => {
     try {
       const { id } = req.params;
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       
       const video = await storage.getVideo(id);
       if (!video) {
@@ -644,7 +644,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch('/api/videos/:id', isAuthenticated, async (req: any, res: Response) => {
     try {
       const { id } = req.params;
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       const { thumbnail, title } = req.body;
       
       const video = await storage.getVideo(id);
@@ -682,7 +682,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Job status route
   app.get('/api/jobs', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       // For simplicity, we'll get jobs by fetching videos and their associated jobs
       const videos = await storage.getUserVideos(userId);
       
@@ -738,7 +738,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.patch('/api/account/me', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       const validatedData = updateUserProfileSchema.parse(req.body);
       
       const updatedUser = await storage.updateUserProfile(userId, validatedData);
@@ -764,7 +764,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/account/credits', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       const creditsRemaining = await storage.getUserCreditsBalance(userId);
       const ledger = await storage.getUserCreditsHistory(userId, 50);
       
@@ -785,7 +785,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/account/subscription/cancel', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = req.session.userId;
       await storage.cancelSubscription(userId);
       
       res.json({
@@ -988,17 +988,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/auth/logout', async (req: Request, res: Response) => {
     try {
-      (req as any).session.destroy((err: any) => {
+      const session = (req as any).session;
+      const sessionId = req.sessionID;
+      
+      // Always respond with success for UX consistency
+      const successResponse = { ok: true, message: 'Sesión cerrada exitosamente' };
+      
+      if (!session) {
+        // No session to destroy, but still clear cookie
+        res.clearCookie('connect.sid', {
+          path: '/',
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+        });
+        return res.json(successResponse);
+      }
+      
+      // Destroy session with proper error handling
+      session.destroy((err: any) => {
         if (err) {
-          console.error("Logout error:", err);
-          return res.status(500).json({ message: "Error al cerrar sesión" });
+          console.error(JSON.stringify({
+            stage: "logout_error",
+            sessionId: sessionId,
+            error: err.message,
+            ip: req.ip
+          }));
+          // Continue with cookie clearing even if session destroy fails
         }
-        res.clearCookie('connect.sid');
-        res.json({ ok: true, message: 'Sesión cerrada exitosamente' });
+        
+        // Clear cookie with exact same attributes used when creating
+        res.clearCookie('connect.sid', {
+          path: '/',
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+        });
+        
+        console.log(JSON.stringify({
+          stage: "logout_success",
+          sessionId: sessionId,
+          ip: req.ip
+        }));
+        
+        res.json(successResponse);
       });
+      
     } catch (error) {
-      console.error("Logout error:", error);
-      res.status(500).json({ message: "Error al cerrar sesión" });
+      console.error(JSON.stringify({
+        stage: "logout_exception",
+        error: (error as Error).message,
+        ip: req.ip
+      }));
+      
+      // Still clear cookie and return success for UX
+      res.clearCookie('connect.sid', {
+        path: '/',
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+      });
+      
+      res.json({ ok: true, message: 'Sesión cerrada exitosamente' });
     }
   });
 

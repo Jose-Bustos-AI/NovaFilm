@@ -122,10 +122,7 @@ export function AccountPage() {
 
   // Logout mutation
   const logoutMutation = useMutation({
-    mutationFn: () => apiRequest('/api/logout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    }),
+    mutationFn: () => apiRequest('POST', '/api/auth/logout', {}),
     onSuccess: () => {
       window.location.href = '/';
     },
