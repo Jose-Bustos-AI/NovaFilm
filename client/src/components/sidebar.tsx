@@ -23,12 +23,16 @@ export default function Sidebar() {
       return response.json();
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+      queryClient.clear(); // Clear all cached data
+      
       toast({
         title: "Sesión cerrada",
         description: "Has cerrado sesión exitosamente.",
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+      
+      // Force navigate to home
       navigate('/');
     },
     onError: () => {

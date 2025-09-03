@@ -124,6 +124,15 @@ export function AccountPage() {
   const logoutMutation = useMutation({
     mutationFn: () => apiRequest('POST', '/api/auth/logout', {}),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+      queryClient.clear(); // Clear all cached data
+      
+      toast({
+        title: "Sesión cerrada",
+        description: "Has cerrado sesión exitosamente.",
+      });
+      
       window.location.href = '/';
     },
     onError: () => {
