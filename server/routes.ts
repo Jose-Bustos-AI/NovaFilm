@@ -108,6 +108,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         validatedData.aspectRatio = "9:16"; // Override to default
       }
       
+      // Generate random seeds if not provided
+      const seeds = validatedData.seeds ?? Math.floor(Math.random() * 1000000);
+      
       // Ensure prompt is in English (basic heuristic)
       if (validatedData.prompt.includes('ñ') || validatedData.prompt.includes('á') || validatedData.prompt.includes('é')) {
         console.log(`[VALIDATION] Spanish detected in prompt for user ${userId}, continuing...`);
@@ -135,7 +138,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         userId: userId,
         taskId: taskId,
         promptLength: validatedData.prompt.length,
-        model: "veo3_fast"
+        model: "veo3_fast",
+        seeds: seeds
       }));
 
       // Call Kie.ai API
@@ -147,7 +151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           model: "veo3_fast",
           aspectRatio: validatedData.aspectRatio,
           callBackUrl,
-          seeds: validatedData.seeds,
+          seeds: seeds,
           enableFallback: false,
         });
 
