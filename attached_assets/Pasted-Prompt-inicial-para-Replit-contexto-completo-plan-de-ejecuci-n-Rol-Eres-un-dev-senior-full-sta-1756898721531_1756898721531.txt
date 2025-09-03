@@ -1,0 +1,293 @@
+Prompt inicial para Replit (contexto completo + plan de ejecución)
+
+Rol: Eres un dev senior full-stack encargado de construir un MVP SaaS de generación de vídeos con Kie.ai (Veo3 Fast), sobre Next.js 15 (App Router) con Node 22, TypeScript, Tailwind, shadcn/ui, OpenAI (chatbot), Neon Postgres y despliegue en Replit. Tu objetivo: dejar el MVP funcional end-to-end (registro/login, chat → prompt estructurado, job a Kie.ai, callback, guardado en Neon, galería con reproducción/descarga).
+
+1) Stack y versiones objetivo
+
+Frontend: Next.js 15.5.x (App Router, Turbopack beta), React 19.1, TypeScript 5.9, TailwindCSS, shadcn/ui, Video.js.
+
+Backend: API Routes de Next.js (Route Handlers), Node 22.x.
+
+IA: OpenAI para chatbot (solo texto) en frontend (stream opcional).
+
+Generación de vídeo: Kie.ai (Veo3 Fast) vía REST.
+
+DB: Neon (Postgres serverless). ORM: drizzle-orm (preferido) o postgres nativo.
+
+Auth: Para MVP, JWT simple (email+password hash) con cookies httpOnly (o Supabase Auth si es más rápido en Replit; elige la opción de menor fricción y documenta).
+
+Storage: MVP usa URL directa de Kie.ai (no copia local). Futuro: R2/Bunny/Supabase Storage.
+
+Reproductor: Video.js.
+
+2) Variables de entorno (usa secretos de Replit)
+
+Define .env y documenta cómo setearlos en Replit:
+
+OPENAI_API_KEY=...
+KIE_API_BASE=https://api.kie.ai/api/v1
+KIE_API_KEY=...                # si aplica header auth, documenta
+APP_BASE_URL=https://<repl-url>  # para callback público
+DATABASE_URL=postgresql://...    # Neon
+JWT_SECRET=super-secret-long-and-random
+NODE_ENV=development
+
+
+Si Replit necesita proxy para callback, documenta el URL público (p. ej. “Always On”).
+
+3) Esquema de BBDD (Drizzle SQL)
+
+Crea migraciones iniciales con este esquema (ajusta tipos a Drizzle/Postgres):
+
+users
+
+id UUID PK
+
+email TEXT UNIQUE NOT NULL
+
+password_hash TEXT
+
+created_at TIMESTAMPTZ DEFAULT now()
+
+job_status ENUM: QUEUED | PROCESSING | READY | FAILED
+
+jobs
+
+id UUID PK DEFAULT gen_random_uuid()
+
+user_id UUID REFERENCES users(id)
+
+task_id TEXT UNIQUE NOT NULL
+
+status job_status NOT NULL DEFAULT 'QUEUED'
+
+error_reason TEXT
+
+created_at TIMESTAMPTZ DEFAULT now()
+
+videos
+
+id UUID PK DEFAULT gen_random_uuid()
+
+user_id UUID REFERENCES users(id)
+
+task_id TEXT UNIQUE NOT NULL
+
+prompt TEXT
+
+provider_video_url TEXT
+
+resolution TEXT
+
+fallback_flag BOOLEAN DEFAULT false
+
+created_at TIMESTAMPTZ DEFAULT now()
+
+Incluye seed opcional para un usuario demo (siempre desactivable).
+
+4) Endpoints internos (Route Handlers)
+
+Implementa en /app/api/...:
+
+POST /api/auth/register
+Input: { email, password }
+
+Valida email/password, hashea con bcrypt, inserta user.
+
+Responde y setea cookie JWT httpOnly.
+
+POST /api/auth/login
+Input: { email, password }
+
+Verifica contra hash, setea cookie JWT httpOnly.
+
+POST /api/create-job (auth requerida)
+Input: { prompt, aspectRatio, seeds? }
+
+Inserta en jobs (status QUEUED) y en videos (placeholder con task_id).
+
+Llama a Kie.ai POST /veo/generate con mínimo:
+
+{
+  "prompt": "<en inglés>",
+  "model": "veo3_fast",
+  "aspectRatio": "9:16",
+  "callBackUrl": "${APP_BASE_URL}/api/veo-callback"
+}
+
+
+Responde { run_id, taskId }.
+
+POST /api/veo-callback (público; valida firma si Kie.ai la provee)
+Input (ejemplo de Kie.ai):
+
+{
+  "code": 200,
+  "msg": "Veo3 video generated successfully.",
+  "data": {
+    "taskId": "veo_task_abcdef123456",
+    "info": {
+      "resultUrls": ["https://cdn.kie.ai/video123.mp4"],
+      "resolution": "1080p"
+    },
+    "fallbackFlag": false
+  }
+}
+
+
+Idempotente: upsert por task_id.
+
+Actualiza jobs.status=READY o FAILED.
+
+Actualiza videos.provider_video_url, resolution, fallback_flag.
+
+Responde rápido (<15s).
+
+GET /api/videos (auth)
+
+Lista vídeos del usuario autenticado (orden desc por created_at).
+
+GET /api/videos/:id/download (auth)
+
+Proxy seguro a la URL de Kie.ai (o 302) y advierte que las URLs pueden expirar.
+
+5) Integración con Kie.ai
+
+Base URL: ${KIE_API_BASE}.
+
+Endpoints usados:
+
+POST /veo/generate (obligatorio).
+
+GET /veo/record-info?taskId=... (opcional para debugging/polling).
+
+GET /veo/get-1080p-video?taskId=... (solo si aplica 16:9; MVP no obligatorio).
+
+Autenticación: si requiere header (e.g. Authorization: Bearer <KIE_API_KEY>), documéntalo y aplícalo.
+
+6) Chatbot (OpenAI) → Prompt estructurado
+
+UI: chat simple con input y botón “Generate”.
+
+El chatbot toma la idea del usuario (en español o inglés), normaliza y devuelve JSON:
+
+{
+  "prompt": "<EN-only prompt refined>",
+  "model": "veo3_fast",
+  "aspectRatio": "9:16",
+  "seeds": <optional number>,
+  "enableFallback": false
+}
+
+
+Envía ese JSON a /api/create-job.
+
+7) UI/UX (App Router)
+
+Rutas:
+
+/auth/login, /auth/register
+
+/app (dashboard)
+
+/app/new (chat & form)
+
+/app/gallery (galería)
+
+Componentes: usa shadcn/ui (Cards, Button, Input, Tabs, Badge, Toast).
+
+Estilo: Tailwind; layout responsive, dark-friendly.
+
+Player: Video.js para reproducir provider_video_url.
+
+Toasts: feedback en creación de job y llegada del vídeo (SSE/polling ligero a /api/videos cada 15–20s o revalidateTag).
+
+8) Seguridad y buenas prácticas
+
+Sanitiza inputs (zod).
+
+JWT en cookie httpOnly + SameSite=Lax, Secure en prod.
+
+Rate limit básico a /api/create-job por user_id.
+
+Logs estructurados (pino) con redacción de secretos.
+
+Idempotencia del callback por task_id.
+
+Timeout a peticiones externas (10–15s).
+
+No almacenes el archivo de vídeo, solo la URL.
+
+9) Estructura de carpetas sugerida
+/app
+  /auth/(routes)
+  /app/(dashboard)
+  /api/auth/register/route.ts
+  /api/auth/login/route.ts
+  /api/create-job/route.ts
+  /api/veo-callback/route.ts
+  /api/videos/route.ts
+  /api/videos/[id]/download/route.ts
+/components
+/lib
+  db/
+  auth/
+  kie/
+  openai/
+  utils/
+/styles
+/drizzle
+
+10) Scripts recomendados en package.json
+
+dev: next dev --turbo
+
+build: next build
+
+start: next start
+
+db:generate, db:migrate, db:push (drizzle-kit)
+
+lint, typecheck
+
+11) Criterios de aceptación del MVP
+
+Registro y login funcionando con cookie JWT httpOnly (o Supabase Auth documentado y activo).
+
+Chat que recibe idea libre y genera prompt EN estructurado.
+
+POST /api/create-job crea taskId y dispara Kie.ai con callBackUrl correcto.
+
+POST /api/veo-callback actualiza jobs y videos de forma idempotente.
+
+Galería muestra los vídeos del usuario autenticado, con reproducción (Video.js) y descarga (endpoint proxy/redirect).
+
+Código tipado (TS), validaciones (zod), y manejo de errores básico.
+
+README con instrucciones para setear .env en Replit y configurar Neon.
+
+12) Entregables adicionales
+
+README con: setup Replit, variables, conexión Neon, URLs de callback, cómo probar end-to-end (incluye payload de ejemplo del callback).
+
+Colección REST (Thunder Client/HTTP files) para endpoints locales (opcional).
+
+Notas sobre cómo activar “Always On” o equivalente para recibir callbacks.
+
+13) Pasos de ejecución (hazlos automáticamente y confirma)
+
+Inicializa proyecto Next 15 con TS, Tailwind, shadcn/ui y Video.js.
+
+Configura Drizzle con Neon y crea migraciones del esquema.
+
+Implementa Auth (JWT cookie httpOnly o Supabase Auth; elige la más rápida y documenta).
+
+Implementa los Route Handlers descritos.
+
+Crea el flujo del chat que llama a OpenAI y luego a /api/create-job.
+
+Implementa el callback y la galería con polling ligero.
+
+Prepara .env.example, scripts y README.
+
+Ejecuta pruebas manuales de punta a punta y deja logs con ejemplos (sin credenciales).
