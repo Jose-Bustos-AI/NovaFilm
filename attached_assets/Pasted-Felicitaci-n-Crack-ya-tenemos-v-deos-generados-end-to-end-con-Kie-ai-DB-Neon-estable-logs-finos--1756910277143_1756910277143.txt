@@ -1,0 +1,101 @@
+Felicitación
+
+Crack: ya tenemos vídeos generados end-to-end con Kie.ai, DB Neon estable, logs finos y galería funcionando. Ahora vamos a convertir el chat en un agente de prompt-engineering en español sin romper nada de lo que ya funciona.
+
+🧩 Contexto
+
+Queremos que el asistente hable siempre en español, haga 3–4 preguntas cortas y encadenadas para afinar la idea (tipo de coche/estilo/ambiente/hora, etc.), y cuando tenga todo, construya un prompt final en inglés (obligatorio para Kie) y dispare la generación. El usuario debe ver un mensaje tipo: “Perfecto, dame unos minutillos…”.
+
+🧱 Regla de oro
+
+No cambies nada que ya funciona (auth, DB, endpoints, polling/callback, seeds y estados). Limítate a añadir el flujo conversacional y la orquestación para que, al finalizar las preguntas, se llame a la misma ruta de creación de job con el prompt en inglés.
+
+🛠️ Instrucciones
+
+System Prompt del agente (OpenAI) – español + multi-turno
+
+En server/services/openai.ts (o donde definas el prompt del asistente), reemplaza/añade un system prompt así (respeta JSON final y que el chat visible sea en español):
+
+Eres un asistente conversacional que habla SIEMPRE en español. Ayudas al usuario a crear un prompt óptimo para generar un video con IA (Kie.ai, modelo veo3_fast, 9:16).
+
+Flujo:
+1) El usuario da una idea inicial.
+2) Haz EXACTAMENTE 3 o 4 preguntas cortas, una a la vez, para concretar (elige entre: tipo de sujeto/estilo visual/ambiente/hora/época/público/ritmo). Pregunta -> espera respuesta -> siguiente. Evita párrafos largos.
+3) Cuando tengas suficiente info, responde:
+   “Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.”
+4) A CONTINUACIÓN (misma respuesta) genera SOLO un bloque JSON válido con ESTA forma:
+   {
+     "finalPromptEnglish": "<prompt_de_video_en_INGLÉS_bien_detallado_y_cinematográfico>"
+   }
+Reglas:
+- Todo el chat visible es en español.
+- El JSON debe estar en INGLÉS y ser válido (una sola línea si es posible).
+- No incluyas código ni explicaciones fuera del chat y del JSON final.
+- No uses markdown en el JSON.
+
+
+Estado conversacional en el frontend (Chat) – “refine flow”
+
+En client/src/components/chat-interface.tsx introduce un modo de refinamiento:
+
+mode: 'idle' | 'refining' | 'ready'
+
+Al primer mensaje del usuario → mode='refining'. Muestra preguntas del asistente y recoge respuestas.
+
+Detecta el JSON final (clave finalPromptEnglish) en la última respuesta del asistente:
+
+Extrae el JSON con parser tolerante.
+
+const finalPrompt = data.finalPromptEnglish;
+
+Cambia a mode='ready' y lanza el flujo actual de generación usando /api/create-job con:
+
+prompt = finalPrompt
+
+model = 'veo3_fast'
+
+aspectRatio = '9:16'
+
+En el chat imprime: “Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.”
+
+Tras disparar, vuelve a mode='idle'.
+
+No rompas el flujo actual: reutiliza la misma mutación que ya usa el chat para llamar a /api/refine-prompt y a /api/create-job. Solo añade la detección del JSON final y la transición de estado.
+
+Parser robusto del JSON final
+
+En el cliente, añade una función segura para extraer el objeto { finalPromptEnglish } de la última respuesta del asistente:
+
+Busca el primer { y el último } y haz JSON.parse con try/catch.
+
+Si falla, sigue en modo preguntas y muestra: “Necesito una confirmación más para cerrar el prompt.”
+
+Mensajería y UX
+
+Todas las preguntas y respuestas del asistente en español y breves.
+
+Cuando se dispare la generación, muestra el ETA actual: “Suele tardar 2–5 minutos. Te aviso en cuanto esté listo.”
+
+Mantén el scroll/overflow ya corregidos.
+
+Back-end de refinamiento (si aplica)
+
+Si existe endpoint /api/refine-prompt, actualízalo para pasar el nuevo system prompt y devolver íntegramente el texto del asistente (el frontend se encarga de extraer el JSON).
+
+No cambies /api/create-job ni la validación/semillas/polling.
+
+Salvaguardas
+
+Timeout de refinamiento: si el usuario no responde en 90s, sugerir: “¿Seguimos? Puedo generar con lo que tengo.”
+
+Botón “Usar lo que hay”: permite saltar preguntas y generar con la info parcial (el asistente rellena con defaults cinematográficos).
+
+✅ Criterios de aceptación
+
+El asistente siempre escribe en español y hace 3–4 preguntas cortas antes de generar.
+
+La última respuesta del asistente contiene el mensaje en español + un JSON válido con finalPromptEnglish en inglés.
+
+El frontend detecta el JSON, dispara /api/create-job con el prompt en inglés y muestra el ETA.
+
+No se rompe nada existente: seeds válidos, veo3_fast, 9:16, polling/callback, galería y descargas siguen funcionando.

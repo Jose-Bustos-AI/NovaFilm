@@ -165,22 +165,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Chat routes
   app.post('/api/chat', isAuthenticated, async (req: Request, res: Response) => {
     try {
-      const { message, messages } = req.body;
+      const { message, conversationHistory } = req.body;
       
-      if (!message && !messages) {
-        return res.status(400).json({ message: "Message or messages array required" });
+      if (!message) {
+        return res.status(400).json({ message: "Message is required" });
       }
 
-      let response: string;
-      
-      if (messages) {
-        response = await generateChatResponse(messages);
-      } else {
-        // Single message - assume it's for prompt refinement
-        const refined = await refinePrompt(message);
-        response = `I'll create an optimized prompt for you:\n\n**Refined Prompt:** "${refined.prompt}"\n\n**Settings:** ${refined.aspectRatio} aspect ratio, ${refined.model} model`;
-      }
+      // Build full conversation for OpenAI
+      const fullConversation = [
+        ...(conversationHistory || []),
+        { role: 'user', content: message }
+      ];
 
+      const response = await generateChatResponse(fullConversation);
       res.json({ response });
     } catch (error) {
       console.error("Chat error:", error);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,8 @@ interface Message {
   timestamp: Date;
 }
 
+type ChatMode = 'idle' | 'refining' | 'ready';
+
 interface RefinedPrompt {
   prompt: string;
   model: string;
@@ -25,12 +27,15 @@ export default function ChatInterface() {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
-      content: "Hi! I'm here to help you create amazing videos. What kind of video would you like to generate today?",
+      content: "¡Hola! Soy tu asistente de videos con IA. ¿Qué tipo de video te gustaría crear hoy?",
       timestamp: new Date()
     }
   ]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [chatMode, setChatMode] = useState<ChatMode>('idle');
+  const [conversationHistory, setConversationHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [refinementTimeout, setRefinementTimeout] = useState<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -40,17 +45,70 @@ export default function ChatInterface() {
     refetchInterval: 60000,
   });
 
+  // Function to parse JSON from assistant response
+  const parseAssistantResponse = (response: string): { message: string; finalPrompt?: string } => {
+    // Look for JSON block with finalPromptEnglish
+    const jsonMatch = response.match(/\{[^}]*"finalPromptEnglish"[^}]*\}/);
+    if (jsonMatch) {
+      try {
+        const jsonData = JSON.parse(jsonMatch[0]);
+        if (jsonData.finalPromptEnglish) {
+          const messageWithoutJson = response.replace(jsonMatch[0], '').trim();
+          return {
+            message: messageWithoutJson || "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
+            finalPrompt: jsonData.finalPromptEnglish
+          };
+        }
+      } catch (e) {
+        console.log('Failed to parse JSON from response:', e);
+      }
+    }
+    return { message: response };
+  };
+
   const chatMutation = useMutation({
     mutationFn: async (message: string) => {
-      const response = await apiRequest('POST', '/api/chat', { message });
+      const response = await apiRequest('POST', '/api/chat', { 
+        message,
+        conversationHistory: conversationHistory 
+      });
       return await response.json();
     },
     onSuccess: (data) => {
+      const parsed = parseAssistantResponse(data.response);
+      
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: data.response,
+        content: parsed.message,
         timestamp: new Date()
       }]);
+      
+      // Update conversation history
+      setConversationHistory(prev => [
+        ...prev,
+        { role: 'assistant', content: parsed.message }
+      ]);
+      
+      // If we found a final prompt, trigger generation
+      if (parsed.finalPrompt) {
+        setChatMode('ready');
+        // Clear timeout if it exists
+        if (refinementTimeout) {
+          clearTimeout(refinementTimeout);
+          setRefinementTimeout(null);
+        }
+        
+        // Auto-generate with the final prompt
+        if (dbHealth && (dbHealth as any).ok) {
+          generateMutation.mutate({
+            prompt: parsed.finalPrompt,
+            model: "veo3_fast",
+            aspectRatio: "9:16",
+            enableFallback: false
+          });
+        }
+      }
+      
       setIsTyping(false);
     },
     onError: (error) => {
@@ -86,8 +144,8 @@ export default function ChatInterface() {
     },
     onSuccess: (data) => {
       toast({
-        title: "Video Generation Started",
-        description: "Your video is being processed. This may take a few minutes.",
+        title: "Generación de Video Iniciada",
+        description: "Tu video se está procesando. Suele tardar 2-5 minutos.",
       });
       
       // Refresh videos and jobs
@@ -97,9 +155,13 @@ export default function ChatInterface() {
       // Add ETA message to chat
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: `Got it! I'm generating your video with veo3_fast (9:16). This usually takes 2–5 minutes. I'll update your gallery automatically.`,
+        content: `¡Perfecto! Ya está en marcha tu video. Suele tardar 2–5 minutos. Te aviso en cuanto esté listo y lo verás en tu galería automáticamente.`,
         timestamp: new Date()
       }]);
+      
+      // Reset chat mode
+      setChatMode('idle');
+      setConversationHistory([]);
     },
     onError: (error) => {
       if (isUnauthorizedError(error)) {
@@ -115,10 +177,14 @@ export default function ChatInterface() {
       }
       
       toast({
-        title: "Generation Failed",
-        description: "Failed to start video generation. Please try again.",
+        title: "Error en Generación",
+        description: "No se pudo iniciar la generación del video. Inténtalo de nuevo.",
         variant: "destructive",
       });
+      
+      // Reset chat mode on error
+      setChatMode('idle');
+      setConversationHistory([]);
     },
   });
 
@@ -168,6 +234,27 @@ export default function ChatInterface() {
     },
   });
 
+  // Set up refinement timeout
+  useEffect(() => {
+    if (chatMode === 'refining' && !refinementTimeout) {
+      const timeout = setTimeout(() => {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: "¿Seguimos? Puedo generar el video con lo que tengo hasta ahora.",
+          timestamp: new Date()
+        }]);
+        setRefinementTimeout(null);
+      }, 90000); // 90 seconds
+      setRefinementTimeout(timeout);
+    }
+    
+    return () => {
+      if (refinementTimeout) {
+        clearTimeout(refinementTimeout);
+      }
+    };
+  }, [chatMode, refinementTimeout]);
+
   const handleSend = () => {
     if (!input.trim() || chatMutation.isPending) return;
 
@@ -178,20 +265,28 @@ export default function ChatInterface() {
       timestamp: new Date()
     }]);
     
+    // Update conversation history
+    setConversationHistory(prev => [
+      ...prev,
+      { role: 'user', content: userMessage }
+    ]);
+    
     setInput("");
     setIsTyping(true);
 
-    // Check if message seems like a video generation request
-    const isVideoRequest = userMessage.toLowerCase().includes('create') || 
-                          userMessage.toLowerCase().includes('generate') || 
-                          userMessage.toLowerCase().includes('make') ||
-                          userMessage.length > 20; // Assume longer messages are descriptions
-
-    if (isVideoRequest) {
-      refineMutation.mutate(userMessage);
-    } else {
-      chatMutation.mutate(userMessage);
+    // Clear any existing refinement timeout
+    if (refinementTimeout) {
+      clearTimeout(refinementTimeout);
+      setRefinementTimeout(null);
     }
+
+    // Set mode to refining on first user message (if not already refining)
+    if (chatMode === 'idle') {
+      setChatMode('refining');
+    }
+
+    // Always use the chat mutation for the conversational flow
+    chatMutation.mutate(userMessage);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -213,7 +308,7 @@ export default function ChatInterface() {
           AI Video Assistant
         </CardTitle>
         <p className="text-sm text-muted-foreground">
-          Describe your video idea and I'll help you create the perfect prompt
+          Describe tu idea y te ayudo a crear el video perfecto
         </p>
       </CardHeader>
       
@@ -276,16 +371,16 @@ export default function ChatInterface() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyPress={handleKeyPress}
-              placeholder="Describe your video idea..."
+              placeholder="Cuéntame tu idea para el video..."
               className="flex-1"
               disabled={isLoading}
               data-testid="input-chat-message"
             />
             <Button
               onClick={handleSend}
-              disabled={isLoading || !input.trim() || (dbHealth && !(dbHealth as any).ok)}
+              disabled={isLoading || !input.trim() || !dbHealth || !(dbHealth as any)?.ok}
               data-testid="button-send-message"
-              title={dbHealth && !(dbHealth as any).ok ? "Database not configured" : "Send message"}
+              title={!dbHealth || !(dbHealth as any)?.ok ? "Database not configured" : "Send message"}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
