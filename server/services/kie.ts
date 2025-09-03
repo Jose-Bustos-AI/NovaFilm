@@ -41,28 +41,55 @@ export class KieAiService {
   async generateVideo(request: KieVideoGenerationRequest): Promise<KieVideoGenerationResponse> {
     const url = `${this.baseUrl}/veo/generate`;
     
+    // Debug logging (without exposing full prompt)
+    console.log(`[KIE-DEBUG] Endpoint: ${url}, Model: ${request.model}, AspectRatio: ${request.aspectRatio}, PromptLength: ${request.prompt.length}`);
+    console.log(`[KIE-DEBUG] CallBackUrl: ${request.callBackUrl}`);
+    
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
       body: JSON.stringify(request),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Kie.ai API error: ${response.status} ${response.statusText} - ${errorText}`);
+    // Log raw response status and body (truncated)
+    const responseText = await response.text();
+    const truncatedBody = responseText.length > 3000 ? responseText.substring(0, 3000) + '...[truncated]' : responseText;
+    console.log(`[KIE-RAW-RESPONSE] Status: ${response.status}, Body: ${truncatedBody}`);
+
+    let jsonResponse;
+    try {
+      jsonResponse = JSON.parse(responseText);
+    } catch (parseError) {
+      throw new Error(`Kie.ai API returned invalid JSON: ${response.status} ${response.statusText} - ${truncatedBody}`);
     }
 
-    const jsonResponse = await response.json();
-    
-    // Validate the response structure
-    if (!jsonResponse || typeof jsonResponse !== 'object') {
-      throw new Error('Invalid JSON response from Kie.ai API');
+    // Tolerant taskId parsing - check multiple possible fields
+    const extractTaskId = (body: any): string | null => {
+      const data = body?.data ?? body;
+      return data?.taskId || data?.task_id || data?.id || body?.taskId || body?.task_id || body?.id || null;
+    };
+
+    const taskId = extractTaskId(jsonResponse);
+
+    // Handle non-200 status or missing taskId
+    if (response.status !== 200 || !taskId || !jsonResponse?.data) {
+      const errorMsg = jsonResponse?.msg || jsonResponse?.message || response.statusText || 'Invalid response';
+      throw new Error(`HTTP ${response.status} - ${errorMsg}`);
     }
     
-    return jsonResponse;
+    // Return standardized response
+    return {
+      code: jsonResponse.code || 200,
+      msg: jsonResponse.msg || 'Success',
+      data: {
+        taskId: taskId,
+        runId: jsonResponse.data?.runId || jsonResponse.data?.run_id || undefined
+      }
+    };
   }
 
   async getRecordInfo(taskId: string): Promise<any> {

@@ -1,0 +1,96 @@
+Arreglar integración Kie.ai (parseo taskId, headers, callBackUrl, trazas)
+
+Felicitación por avances
+Buen trabajo: ya persistimos en Neon, el flujo crea jobs y videos, y el logging estructurado está activo. Vamos a rematar el cuello: la llamada a Kie.ai devuelve respuesta sin taskId y el job queda en FAILED.
+
+Contexto
+Vemos errores como:
+
+Invalid response from Kie.ai API: missing taskId in response data
+
+(Antes) Cannot read properties of null (reading 'taskId')
+
+Necesitamos endurecer la integración: headers correctos, construcción exacta de callBackUrl, parseo tolerante de la respuesta (aceptar taskId | task_id | id), y logs del body crudo para auditoría. Además, si Kie devuelve error (code ≠ 200 o data nulo), registrar el motivo y no romper el resto del pipeline.
+
+Regla de oro
+No cambies rutas ni contratos existentes del frontend, ni la lógica de DB que ya funciona. Céntrate únicamente en: la llamada a Kie.ai, el parseo de su respuesta, los headers, el callBackUrl y el manejo/registro de errores.
+
+Instrucciones
+
+Headers y endpoint
+
+En el cliente que llama a Kie.ai, asegura:
+
+POST ${KIE_API_BASE}/veo/generate (base https://api.kie.ai/api/v1).
+
+Headers obligatorios:
+
+Authorization: Bearer ${process.env.KIE_API_KEY}
+
+Content-Type: application/json
+
+Accept: application/json
+
+Log de debug (sin exponer prompt completo): endpoint, model, aspectRatio, promptLength.
+
+callBackUrl fiable
+
+Construye callBackUrl así:
+
+Si process.env.APP_BASE_URL existe → \${APP_BASE_URL}/api/veo-callback``.
+
+Si no existe → deriva desde la request (host público) o loguea error claro y devuelve 500.
+
+Loguea el callBackUrl exacto que envías en cada generación.
+
+Parseo tolerante de la respuesta
+
+Guarda el status HTTP y el body crudo de Kie en logs (stringify truncado a 2–3 KB).
+
+Obtén el taskId robustamente:
+
+const data = resp.data ?? resp?.data ?? body?.data ?? body;
+const taskId = data?.taskId || data?.task_id || data?.id || body?.taskId || body?.task_id || body?.id || null;
+
+
+Si resp.status !== 200 o taskId === null o data == null:
+
+Actualiza el job a FAILED con error_reason = HTTP ${status} - ${msg || 'Invalid response'} y guarda un resumen del body (truncado).
+
+Devuelve { message: "Failed to start video generation" } (status 500) al frontend.
+
+No lances excepciones sin capturar; deja trazas claras.
+
+Camino feliz
+
+Si hay taskId válido:
+
+Inserta/actualiza jobs (status QUEUED) y videos placeholder con ese taskId (ya estáis haciéndolo).
+
+Log estructurado:
+
+{"stage":"create-job","userId":"<id>","taskId":"<taskId>","model":"veo3_fast","aspectRatio":"9:16","seeds":<n>,"callBackUrl":"<url>","httpStatus":200}
+
+
+Callback
+
+Ya logueáis payload crudo. Añade además en log derivado:
+
+{"stage":"callback","taskId":"<taskId>","resultUrl":"<firstUrl||null>","resolution":"<res||null>","fallbackFlag":<bool||null>}
+
+
+Idempotencia por taskId (ya hecho). Si resultUrls viene vacío, deja FAILED con razón.
+
+Endpoint de debug (pequeña mejora)
+
+En GET /api/debug/jobs, añade el último body de error de Kie guardado en error_reason truncado a 512–1024 chars para inspección rápida.
+
+Criterios de aceptación
+
+En una nueva generación, el log muestra httpStatus de Kie y el body crudo (truncado).
+
+Si Kie responde con forma diferente (task_id, id), seguimos extrayendo taskId y el job no cae en FAILED por ese motivo.
+
+Si Kie devuelve error real (4xx/5xx o data=null), el job pasa a FAILED con error_reason útil.
+
+Cuando Kie responde OK, el job queda QUEUED y, al llegar el callback, READY con provider_video_url relleno.

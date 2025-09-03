@@ -117,7 +117,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const taskId = `veo_task_${randomUUID()}`;
-      const callBackUrl = `${process.env.APP_BASE_URL || `https://${req.hostname}`}/api/veo-callback`;
+      
+      // Reliable callBackUrl construction
+      let callBackUrl: string;
+      if (process.env.APP_BASE_URL) {
+        callBackUrl = `${process.env.APP_BASE_URL}/api/veo-callback`;
+      } else if (req.hostname && req.hostname !== 'localhost') {
+        callBackUrl = `https://${req.hostname}/api/veo-callback`;
+      } else {
+        console.error('[CALLBACK-URL-ERROR] No APP_BASE_URL and hostname is localhost/invalid');
+        return res.status(500).json({ 
+          message: 'Server configuration error: Unable to construct callback URL' 
+        });
+      }
+      
+      console.log(`[CALLBACK-URL] Using: ${callBackUrl}`);
       
       // Create job and video records
       await storage.createJob({
@@ -155,25 +169,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           enableFallback: false,
         });
 
-        // Check if response data is valid
-        if (!kieResponse.data || !kieResponse.data.taskId) {
-          throw new Error('Invalid response from Kie.ai API: missing taskId in response data');
-        }
-
         console.log(`[KIE-API-SUCCESS] Received taskId: ${kieResponse.data.taskId}, runId: ${kieResponse.data.runId}`);
         
         // Update job and video with the exact taskId from Kie.ai response
         const kieTaskId = kieResponse.data.taskId.trim();
         await storage.updateJobTaskId(taskId, kieTaskId);
         await storage.updateVideoTaskId(taskId, kieTaskId);
-        await storage.updateJobStatus(kieTaskId, 'PROCESSING');
+        await storage.updateJobStatus(kieTaskId, 'QUEUED'); // Changed to QUEUED as per requirements
         
-        // Log successful job and video creation in DB
+        // Structured logging for successful creation
         console.log(JSON.stringify({
-          stage: "create-job-db-success",
-          originalTaskId: taskId,
-          kieTaskId: kieTaskId,
-          userId: userId
+          stage: "create-job",
+          userId: userId,
+          taskId: kieTaskId,
+          model: "veo3_fast",
+          aspectRatio: validatedData.aspectRatio,
+          seeds: seeds,
+          callBackUrl: callBackUrl,
+          httpStatus: 200
         }));
 
         res.json({
@@ -182,11 +195,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           message: "Video generation started successfully"
         });
       } catch (kieError) {
-        console.error(`[KIE-API-ERROR] taskId: ${taskId}, error:`, kieError);
-        await storage.updateJobStatus(taskId, 'FAILED', (kieError as Error).message);
+        const errorMessage = (kieError as Error).message;
+        console.error(`[KIE-API-ERROR] taskId: ${taskId}, error:`, errorMessage);
+        
+        // Update job to FAILED with detailed error reason
+        await storage.updateJobStatus(taskId, 'FAILED', errorMessage);
+        
+        // Return clean error to frontend (status 500)
         res.status(500).json({ 
-          message: "Failed to start video generation",
-          error: (kieError as Error).message 
+          message: "Failed to start video generation"
         });
       }
     } catch (error) {
@@ -249,7 +266,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Update video if we have success data
-      let updatedVideo = false;
       if (callbackData.code === 200 && info && info.resultUrls && info.resultUrls[0]) {
         try {
           await storage.updateVideo(normalizedTaskId, {
@@ -257,18 +273,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
             resolution: info.resolution,
             fallbackFlag: fallbackFlag || false,
           });
-          updatedVideo = true;
         } catch (videoError) {
           console.error(`[VEO-CALLBACK] Failed to update video for taskId: ${normalizedTaskId}`, videoError);
         }
+      } else if (callbackData.code === 200 && (!info?.resultUrls || info.resultUrls.length === 0)) {
+        // Success response but no video URLs - mark as failed
+        await storage.updateJobStatus(normalizedTaskId, 'FAILED', 'No result URLs provided in callback');
       }
       
-      // Structured callback logging
+      // Enhanced callback logging
+      const resultUrl = (callbackData.code === 200 && info?.resultUrls && info.resultUrls[0]) ? info.resultUrls[0] : null;
+      const resolution = (callbackData.code === 200 && info?.resolution) ? info.resolution : null;
+      const fallbackFlagValue = callbackData.code === 200 ? (fallbackFlag || false) : null;
+      
       console.log(JSON.stringify({
         stage: "callback",
         taskId: normalizedTaskId,
-        foundJob: foundJob,
-        updatedVideo: updatedVideo
+        resultUrl: resultUrl,
+        resolution: resolution,
+        fallbackFlag: fallbackFlagValue
       }));
 
       res.status(200).json({ message: "Callback processed successfully" });
@@ -286,7 +309,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: 'Not found' });
       }
       
-      // Get last 5 jobs and videos
+      // Get last 5 jobs and videos with enhanced debugging info
       const recentJobs = await db
         .select()
         .from(jobs)
@@ -299,8 +322,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .orderBy(desc(videos.createdAt))
         .limit(5);
       
+      // Add truncated error reasons for failed jobs
+      const jobsWithTruncatedErrors = recentJobs.map(job => ({
+        ...job,
+        errorReason: job.errorReason 
+          ? (job.errorReason.length > 1024 ? job.errorReason.substring(0, 1024) + '...[truncated]' : job.errorReason)
+          : null
+      }));
+      
       res.json({
-        jobs: recentJobs,
+        jobs: jobsWithTruncatedErrors,
         videos: recentVideos,
         timestamp: new Date().toISOString()
       });
