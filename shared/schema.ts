@@ -126,6 +126,10 @@ export const changePasswordSchema = z.object({
   newPassword: z.string().min(8, "La nueva contraseña debe tener al menos 8 caracteres"),
 });
 
+export const setPasswordSchema = z.object({
+  newPassword: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
+});
+
 // Types
 export type UpsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
@@ -140,3 +144,4 @@ export type UpdateUserProfile = z.infer<typeof updateUserProfileSchema>;
 export type RegisterRequest = z.infer<typeof registerSchema>;
 export type LoginRequest = z.infer<typeof loginSchema>;
 export type ChangePasswordRequest = z.infer<typeof changePasswordSchema>;
+export type SetPasswordRequest = z.infer<typeof setPasswordSchema>;

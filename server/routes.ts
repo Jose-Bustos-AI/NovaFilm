@@ -1,11 +1,11 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated, getUserId } from "./replitAuth";
+import { setupLocalAuth, isAuthenticated, getUserId } from "./localAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { sql, desc, eq } from "drizzle-orm";
@@ -147,8 +147,8 @@ function rateLimitMiddleware(maxRequests: number = 5, windowMs: number = 60000) 
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Auth middleware
-  await setupAuth(app);
+  // Local auth setup only
+  await setupLocalAuth(app);
 
   // Note: /api/auth/user is implemented later with hybrid auth support
 
@@ -690,24 +690,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Account management routes
   app.get('/api/account/me', isAuthenticated, async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
-      const user = await storage.getUser(userId);
+      // Use local session only
+      const session = (req as any).session;
+      const userId = session.userId;
       
-      if (!user) {
+      const user = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+      
+      if (user.length === 0) {
         return res.status(404).json({ message: "Usuario no encontrado" });
       }
       
+      const userData = user[0];
+      
       // Return safe user profile
       const profile = {
-        id: user.id,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        profileImageUrl: user.profileImageUrl,
-        plan: user.plan,
-        creditsRemaining: user.creditsRemaining,
-        subscriptionStatus: user.subscriptionStatus,
-        createdAt: user.createdAt
+        id: userData.id,
+        email: userData.email,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        profileImageUrl: userData.profileImageUrl,
+        plan: userData.plan,
+        creditsRemaining: userData.creditsRemaining,
+        subscriptionStatus: userData.subscriptionStatus,
+        createdAt: userData.createdAt,
+        hasPassword: !!userData.passwordHash // Add this info for frontend
       };
       
       res.json(profile);
@@ -987,30 +993,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const session = (req as any).session;
       
-      // Check for local auth session first
+      // Check for local auth session only
       if (session?.userId) {
         const user = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
-        if (user.length > 0) {
-          const userData = user[0];
-          return res.json({
-            id: userData.id,
-            email: userData.email,
-            firstName: userData.firstName,
-            lastName: userData.lastName,
-            credits: userData.creditsRemaining,
-            profileImageUrl: userData.profileImageUrl,
-            plan: userData.plan,
-            subscriptionStatus: userData.subscriptionStatus,
-            createdAt: userData.createdAt
-          });
-        }
-      }
-      
-      // Check for Replit auth session
-      const replitUser = (req as any).user;
-      if (replitUser?.claims?.sub) {
-        const userId = replitUser.claims.sub;
-        const user = await db.select().from(users).where(eq(users.id, userId)).limit(1);
         if (user.length > 0) {
           const userData = user[0];
           return res.json({
@@ -1082,6 +1067,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
     } catch (error) {
       console.error("Change password error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // Set password for users who don't have one (from Replit Auth migration)
+  app.post('/api/account/set-password', async (req: Request, res: Response) => {
+    try {
+      // Check authentication (local session only)
+      const session = (req as any).session;
+      if (!session?.userId) {
+        return res.status(401).json({ message: "No autenticado" });
+      }
+      
+      const body = setPasswordSchema.parse(req.body);
+      const { newPassword } = body;
+      
+      // Get user
+      const user = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+      if (user.length === 0) {
+        return res.status(400).json({ message: "Usuario no encontrado" });
+      }
+      
+      const userData = user[0];
+      
+      // Check if user already has a password
+      if (userData.passwordHash) {
+        return res.status(400).json({ message: "El usuario ya tiene una contraseña configurada. Usa cambiar contraseña." });
+      }
+      
+      // Hash and set new password
+      const hashedPassword = await argon2.hash(newPassword);
+      await db.update(users)
+        .set({ 
+          passwordHash: hashedPassword,
+          updatedAt: new Date()
+        })
+        .where(eq(users.id, session.userId));
+      
+      console.log(JSON.stringify({
+        stage: "set_password",
+        userId: session.userId,
+        ip: req.ip
+      }));
+      
+      res.json({
+        ok: true,
+        message: "Contraseña establecida exitosamente"
+      });
+      
+    } catch (error) {
+      console.error("Set password error:", error);
       
       if (error instanceof z.ZodError) {
         return res.status(400).json({ 

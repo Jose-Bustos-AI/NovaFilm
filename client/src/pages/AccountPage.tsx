@@ -22,6 +22,7 @@ interface UserProfile {
   creditsRemaining: number;
   subscriptionStatus: string;
   createdAt: string;
+  hasPassword: boolean;
 }
 
 interface CreditEntry {
@@ -158,6 +159,28 @@ export function AccountPage() {
     }
   });
 
+  // Set password mutation (for users without password)
+  const setPasswordMutation = useMutation({
+    mutationFn: (data: {newPassword: string}) => 
+      apiRequest('POST', '/api/account/set-password', data),
+    onSuccess: () => {
+      toast({
+        title: "Contraseña establecida",
+        description: "Tu contraseña ha sido establecida exitosamente."
+      });
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setShowPasswordForm(false);
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error.message || "No se pudo establecer la contraseña.",
+        variant: "destructive"
+      });
+    }
+  });
+
   const handleUpdateProfile = () => {
     const cleanData: any = {};
     if (editForm.firstName.trim()) cleanData.firstName = editForm.firstName.trim();
@@ -186,10 +209,17 @@ export function AccountPage() {
       return;
     }
 
-    changePasswordMutation.mutate({
-      currentPassword: passwordForm.currentPassword,
-      newPassword: passwordForm.newPassword
-    });
+    // Use different mutation based on whether user has password or not
+    if (profile?.hasPassword) {
+      changePasswordMutation.mutate({
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword
+      });
+    } else {
+      setPasswordMutation.mutate({
+        newPassword: passwordForm.newPassword
+      });
+    }
   };
 
   const formatDate = (dateString: string) => {
@@ -368,25 +398,32 @@ export function AccountPage() {
           <CardHeader>
             <CardTitle>Seguridad</CardTitle>
             <CardDescription>
-              Cambia tu contraseña para mantener tu cuenta segura
+              {profile?.hasPassword 
+                ? "Cambia tu contraseña para mantener tu cuenta segura"
+                : "Establece una contraseña para acceder a tu cuenta de forma independiente"
+              }
             </CardDescription>
           </CardHeader>
           <CardContent>
             {showPasswordForm ? (
               <div className="space-y-4">
+                {profile?.hasPassword && (
+                  <div>
+                    <Label htmlFor="currentPassword">Contraseña Actual</Label>
+                    <Input
+                      id="currentPassword"
+                      type="password"
+                      value={passwordForm.currentPassword}
+                      onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
+                      placeholder="Ingresa tu contraseña actual"
+                      data-testid="input-current-password"
+                    />
+                  </div>
+                )}
                 <div>
-                  <Label htmlFor="currentPassword">Contraseña Actual</Label>
-                  <Input
-                    id="currentPassword"
-                    type="password"
-                    value={passwordForm.currentPassword}
-                    onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
-                    placeholder="Ingresa tu contraseña actual"
-                    data-testid="input-current-password"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="newPassword">Nueva Contraseña</Label>
+                  <Label htmlFor="newPassword">
+                    {profile?.hasPassword ? "Nueva Contraseña" : "Contraseña"}
+                  </Label>
                   <Input
                     id="newPassword"
                     type="password"
@@ -397,23 +434,34 @@ export function AccountPage() {
                   />
                 </div>
                 <div>
-                  <Label htmlFor="confirmPassword">Confirmar Nueva Contraseña</Label>
+                  <Label htmlFor="confirmPassword">
+                    {profile?.hasPassword ? "Confirmar Nueva Contraseña" : "Confirmar Contraseña"}
+                  </Label>
                   <Input
                     id="confirmPassword"
                     type="password"
                     value={passwordForm.confirmPassword}
                     onChange={(e) => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
-                    placeholder="Repite la nueva contraseña"
+                    placeholder="Repite la contraseña"
                     data-testid="input-confirm-password"
                   />
                 </div>
                 <div className="flex space-x-2">
                   <Button 
                     onClick={handleChangePassword}
-                    disabled={changePasswordMutation.isPending || !passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword}
+                    disabled={
+                      (changePasswordMutation.isPending || setPasswordMutation.isPending) ||
+                      (profile?.hasPassword 
+                        ? (!passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword)
+                        : (!passwordForm.newPassword || !passwordForm.confirmPassword)
+                      )
+                    }
                     data-testid="button-save-password"
                   >
-                    {changePasswordMutation.isPending ? 'Cambiando...' : 'Cambiar Contraseña'}
+                    {(changePasswordMutation.isPending || setPasswordMutation.isPending) 
+                      ? 'Guardando...' 
+                      : (profile?.hasPassword ? 'Cambiar Contraseña' : 'Establecer Contraseña')
+                    }
                   </Button>
                   <Button 
                     variant="outline"
@@ -432,7 +480,7 @@ export function AccountPage() {
                 onClick={() => setShowPasswordForm(true)}
                 data-testid="button-change-password"
               >
-                Cambiar Contraseña
+                {profile?.hasPassword ? 'Cambiar Contraseña' : 'Establecer Contraseña'}
               </Button>
             )}
           </CardContent>

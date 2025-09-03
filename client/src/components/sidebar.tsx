@@ -32,8 +32,11 @@ export default function Sidebar() {
       navigate('/');
     },
     onError: () => {
-      // Fallback to Replit logout if local logout fails
-      window.location.href = "/api/logout";
+      toast({
+        title: "Error",
+        description: "No se pudo cerrar la sesión. Intenta de nuevo.",
+        variant: "destructive"
+      });
     },
   });
 
