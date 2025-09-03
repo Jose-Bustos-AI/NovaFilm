@@ -44,52 +44,130 @@ export default function VideoGallery({ videos, isLoading, showAllVideos = false 
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       
-      video.crossOrigin = 'anonymous';
-      video.currentTime = 1; // Capture at 1 second
+      // Set a timeout to avoid hanging
+      const timeout = setTimeout(() => {
+        console.log('Thumbnail capture timeout for:', videoUrl);
+        resolve(null);
+      }, 15000);
+      
+      // Try without crossOrigin first, as external videos may not support CORS
+      video.muted = true;
+      video.preload = 'metadata';
+      video.playsInline = true;
+      
+      let metadataLoaded = false;
+      let hasTriedSeek = false;
       
       video.onloadedmetadata = () => {
-        canvas.width = Math.min(video.videoWidth, 320);
-        canvas.height = Math.min(video.videoHeight, 180);
+        console.log('Video metadata loaded:', video.videoWidth, 'x', video.videoHeight);
+        metadataLoaded = true;
         
-        video.onseeked = () => {
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-            resolve(dataUrl);
-          } else {
-            resolve(null);
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          canvas.width = Math.min(video.videoWidth, 320);
+          canvas.height = Math.min(video.videoHeight, 180);
+          
+          // Try to seek to a frame for thumbnail
+          try {
+            const seekTime = Math.min(0.5, video.duration * 0.1);
+            video.currentTime = seekTime;
+            hasTriedSeek = true;
+          } catch (e) {
+            console.log('Cannot seek video, trying to capture current frame');
+            captureFrame();
           }
-        };
+        } else {
+          console.log('Invalid video dimensions');
+          clearTimeout(timeout);
+          resolve(null);
+        }
       };
       
-      video.onerror = () => resolve(null);
+      const captureFrame = () => {
+        try {
+          if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            console.log('Thumbnail captured successfully, size:', dataUrl.length);
+            clearTimeout(timeout);
+            resolve(dataUrl);
+          } else {
+            console.log('Failed to capture: invalid video or context');
+            clearTimeout(timeout);
+            resolve(null);
+          }
+        } catch (error) {
+          console.log('Error capturing thumbnail:', error);
+          clearTimeout(timeout);
+          resolve(null);
+        }
+      };
+      
+      video.onseeked = () => {
+        console.log('Video seeked, capturing frame...');
+        captureFrame();
+      };
+      
+      video.oncanplaythrough = () => {
+        console.log('Video can play through');
+        if (metadataLoaded && !hasTriedSeek) {
+          // If we haven't tried seeking yet and video is ready, capture current frame
+          captureFrame();
+        }
+      };
+      
+      video.onerror = (error) => {
+        console.log('Video error:', error);
+        clearTimeout(timeout);
+        resolve(null);
+      };
+      
+      video.onloadstart = () => {
+        console.log('Video load started');
+      };
+      
+      console.log('Starting thumbnail capture for:', videoUrl);
       video.src = videoUrl;
+      video.load();
     });
   };
   
-  // Auto-generate thumbnails for videos without them
+  // Auto-generate titles for videos without them (simplified approach)
   useEffect(() => {
-    const generateMissingThumbnails = async () => {
-      for (const video of videos) {
-        if (video.providerVideoUrl && !video.thumbnail && !updateVideoMutation.isPending) {
-          try {
-            const thumbnail = await captureThumbnail(video.providerVideoUrl);
-            if (thumbnail) {
-              const title = video.title || generateVideoTitle(video.prompt);
-              updateVideoMutation.mutate({
-                videoId: video.id,
-                updates: { thumbnail, title }
-              });
-            }
-          } catch (error) {
-            console.log('Failed to generate thumbnail for video:', video.id);
-          }
+    const generateMissingTitles = async () => {
+      const videosNeedingTitles = videos.filter(video => 
+        video.providerVideoUrl && !video.title
+      );
+      
+      console.log('Videos needing titles:', videosNeedingTitles.length);
+      
+      if (videosNeedingTitles.length === 0 || updateVideoMutation.isPending) {
+        return;
+      }
+      
+      // Process only one video at a time
+      for (const video of videosNeedingTitles.slice(0, 1)) {
+        console.log('Generating title for video:', video.id);
+        try {
+          const title = generateVideoTitle(video.prompt);
+          console.log('Updating video with title:', { videoId: video.id, title });
+          updateVideoMutation.mutate({
+            videoId: video.id,
+            updates: { title }
+          });
+          break; // Only process one at a time
+        } catch (error) {
+          console.log('Error generating title for video:', video.id, error);
         }
       }
     };
     
-    generateMissingThumbnails();
-  }, [videos]);
+    // Add a small delay to ensure DOM is ready
+    const timeoutId = setTimeout(() => {
+      generateMissingTitles();
+    }, 500);
+    
+    return () => clearTimeout(timeoutId);
+  }, [videos, updateVideoMutation.isPending]);
   
   // Generate a user-friendly title from prompt
   const generateVideoTitle = (prompt: string): string => {
@@ -190,16 +268,32 @@ export default function VideoGallery({ videos, isLoading, showAllVideos = false 
                         alt={video.title || `Video ${video.taskId.slice(-8)}`}
                         className="w-full h-48 object-cover"
                         onError={(e) => {
-                          // Fallback to icon if thumbnail fails to load
+                          // Fallback to styled preview if thumbnail fails to load
                           e.currentTarget.style.display = 'none';
                           e.currentTarget.nextElementSibling?.classList.remove('hidden');
                         }}
                       />
                     ) : null}
-                    <div className={`w-full h-48 bg-gradient-to-br from-primary/20 to-emerald-400/20 flex items-center justify-center ${video.thumbnail ? 'hidden' : ''}`}>
-                      <svg className="w-16 h-16 text-primary/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
+                    <div className={`w-full h-48 relative overflow-hidden ${video.thumbnail ? 'hidden' : ''}`}>
+                      {/* Dynamic gradient based on video content */}
+                      <div className="absolute inset-0 bg-gradient-to-br from-blue-500/30 via-purple-500/20 to-pink-500/30"></div>
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent"></div>
+                      
+                      {/* Content preview */}
+                      <div className="relative h-full flex flex-col justify-between p-4">
+                        <div className="flex items-center justify-center flex-1">
+                          <div className="bg-white/10 backdrop-blur-sm rounded-full p-4">
+                            <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1.586a1 1 0 01.707.293l.414.414c.187.187.293.442.293.707V13M15 10h-1.586a1 1 0 00-.707.293l-.414.414A1 1 0 0012 11.414V13" />
+                            </svg>
+                          </div>
+                        </div>
+                        
+                        {/* Mini preview text */}
+                        <div className="text-white text-xs opacity-80 line-clamp-2">
+                          {video.prompt.substring(0, 80)}...
+                        </div>
+                      </div>
                     </div>
                     
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
