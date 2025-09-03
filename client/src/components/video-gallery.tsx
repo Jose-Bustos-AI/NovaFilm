@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import VideoPlayer from "./video-player";
+import VideoPlayer from "@/components/video-player";
 
 interface Video {
   id: string;

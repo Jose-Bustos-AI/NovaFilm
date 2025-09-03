@@ -69,7 +69,7 @@ Respond with JSON in this exact format:
   }
 }
 
-export async function generateChatResponse(messages: Array<{ role: string; content: string }>): Promise<string> {
+export async function generateChatResponse(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<string> {
   try {
     // the newest OpenAI model is "gpt-5" which was released August 7, 2025. do not change this unless explicitly requested by the user
     const response = await openai.chat.completions.create({

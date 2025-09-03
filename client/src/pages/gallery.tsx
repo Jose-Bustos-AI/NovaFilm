@@ -24,7 +24,7 @@ export default function Gallery() {
     }
   }, [isAuthenticated, isLoading, toast]);
 
-  const { data: videos = [], isLoading: videosLoading } = useQuery({
+  const { data: videos = [], isLoading: videosLoading } = useQuery<any[]>({
     queryKey: ["/api/videos"],
     enabled: isAuthenticated,
     refetchInterval: 30000, // Poll every 30 seconds
@@ -53,7 +53,7 @@ export default function Gallery() {
         </header>
 
         <main className="p-8">
-          <VideoGallery videos={videos} isLoading={videosLoading} showAllVideos />
+          <VideoGallery videos={videos as any[]} isLoading={videosLoading} showAllVideos />
         </main>
       </div>
     </div>

@@ -27,13 +27,13 @@ export default function Dashboard() {
     }
   }, [isAuthenticated, isLoading, toast]);
 
-  const { data: videos = [], isLoading: videosLoading } = useQuery({
+  const { data: videos = [], isLoading: videosLoading } = useQuery<any[]>({
     queryKey: ["/api/videos"],
     enabled: isAuthenticated,
     refetchInterval: 20000, // Poll every 20 seconds
   });
 
-  const { data: jobs = [], isLoading: jobsLoading } = useQuery({
+  const { data: jobs = [], isLoading: jobsLoading } = useQuery<any[]>({
     queryKey: ["/api/jobs"],
     enabled: isAuthenticated,
     refetchInterval: 15000, // Poll every 15 seconds
@@ -137,11 +137,11 @@ export default function Dashboard() {
           {/* Main Content Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
             <ChatInterface />
-            <JobStatus jobs={jobs} isLoading={jobsLoading} />
+            <JobStatus jobs={jobs as any[]} isLoading={jobsLoading} />
           </div>
 
           {/* Video Gallery */}
-          <VideoGallery videos={videos} isLoading={videosLoading} />
+          <VideoGallery videos={videos as any[]} isLoading={videosLoading} />
         </main>
       </div>
     </div>

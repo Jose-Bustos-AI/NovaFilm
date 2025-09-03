@@ -55,25 +55,25 @@ export default function Sidebar() {
         <div className="bg-muted rounded-lg p-4">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-8 h-8 bg-gradient-to-br from-primary to-emerald-400 rounded-full flex items-center justify-center text-white text-sm font-medium overflow-hidden">
-              {user?.profileImageUrl ? (
+              {(user as any)?.profileImageUrl ? (
                 <img 
-                  src={user.profileImageUrl} 
+                  src={(user as any).profileImageUrl} 
                   alt="Profile" 
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <span>{user?.firstName?.[0] || user?.email?.[0] || 'U'}</span>
+                <span>{(user as any)?.firstName?.[0] || (user as any)?.email?.[0] || 'U'}</span>
               )}
             </div>
             <div className="min-w-0 flex-1">
               <p className="font-medium text-sm truncate" data-testid="text-username">
-                {user?.firstName && user?.lastName 
-                  ? `${user.firstName} ${user.lastName}`
-                  : user?.email || 'User'
+                {(user as any)?.firstName && (user as any)?.lastName 
+                  ? `${(user as any).firstName} ${(user as any).lastName}`
+                  : (user as any)?.email || 'User'
                 }
               </p>
               <p className="text-xs text-muted-foreground truncate" data-testid="text-email">
-                {user?.email || 'user@example.com'}
+                {(user as any)?.email || 'user@example.com'}
               </p>
             </div>
           </div>
