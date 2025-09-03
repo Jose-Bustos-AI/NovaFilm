@@ -1,0 +1,97 @@
+Buen trabajo: ya guardamos jobs/videos en Neon, extraemos taskId de Kie (200 OK) y tenemos logs y callback handler. Falta garantizar la entrega del vídeo aunque el webhook no llegue.
+
+🧩 Contexto
+
+Kie devuelve taskId y cobra créditos, pero no recibimos el callback y los vídeos no se marcan READY. Necesitamos un Plan B de polling contra record-info para reconciliar el estado y cerrar el ciclo. También consolidamos el rango válido de seeds (≥ 10.000).
+
+🧱 Regla de oro
+
+No toques lo que ya funciona (auth, UI, rutas existentes, DB). No cambies contratos del frontend. Limítate a:
+
+Añadir polling server-side (respaldo del webhook).
+
+Ajustar validación de seeds.
+
+Pequeños cambios de estado y endpoints de debug/estado.
+
+🛠️ Instrucciones
+
+Seeds válidos por defecto
+
+En el esquema/endpoint de /api/create-job, si seeds viene undefined/null, asigna un aleatorio entre 10000 y 999999 (inclusive).
+
+Mantén el log del seeds final usado.
+
+Marcar estado de job
+
+Tras obtener taskId válido de Kie, actualiza jobs.status a PROCESSING (antes de esperar al webhook/polling).
+
+Guarda taskId, user_id, prompt, model="veo3_fast", aspectRatio="9:16", seeds.
+
+Plan B: Polling a Kie (record-info)
+
+Implementa un polling server-side que arranque justo después de crear el job:
+
+Intervalo: cada 20s, máximo 10 minutos (≈30 intentos).
+
+Endpoint de Kie: GET /api/v1/veo/record-info?taskId=<taskId>.
+
+Headers: Authorization: Bearer ${KIE_API_KEY}.
+
+Si la respuesta trae data.info.resultUrls (no vacío):
+
+Actualiza videos por task_id con provider_video_url, resolution, fallback_flag.
+
+jobs.status = READY, error_reason = NULL.
+
+Detén el polling.
+
+Si Kie devuelve error terminal o se alcanza el timeout:
+
+jobs.status = FAILED y guarda error_reason con el último body (truncado a 1KB).
+
+Detén el polling.
+
+Idempotencia: si llega el webhook en medio, el polling debe detectar READY y detenerse sin duplicar.
+
+Registro y control del polling
+
+Mantén un mapa en memoria { taskId → controller } para evitar duplicados y poder cancelar al pasar a READY/FAILED o al recibir webhook.
+
+Logs por intento:
+
+{"stage":"poll","taskId":"<id>","attempt":n,"status":"processing|ready|failed","hasUrls":true|false}
+
+
+Webhook (ya existente)
+
+No cambiar ruta ni contrato.
+
+Al recibir webhook válido: hacer lo mismo que en el camino feliz del polling y cancelar el polling si estaba activo.
+
+Nuevo endpoint de estado (debug)
+
+GET /api/veo/status/:taskId → proxy a record-info y devuelve JSON con:
+
+providerStatus (raw de Kie), resultUrls, resolution, fallbackFlag, lastUpdated.
+
+Solo habilitar en NODE_ENV=development.
+
+UI (mínimo)
+
+Si jobs.status = PROCESSING, muestra badge “Processing” con texto:
+“Proveedor generando… puede tardar 2–5 min. Nos reconciliaremos automáticamente.”
+
+No cambies más UI.
+
+Criterios de aceptación
+
+Crear job → PROCESSING en DB y comienza polling.
+
+Si no llega webhook pero Kie termina, el polling marca READY y guarda provider_video_url.
+
+Si Kie falla o expira, FAILED con error_reason útil.
+
+/api/veo/status/:taskId devuelve el estado real de Kie.
+
+seeds siempre dentro de [10000, 999999].

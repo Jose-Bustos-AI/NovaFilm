@@ -164,6 +164,12 @@ export default function JobStatus({ jobs, isLoading }: JobStatusProps) {
                   </p>
                 )}
                 
+                {job.status === 'PROCESSING' && (
+                  <p className="text-xs text-amber-400 mb-2">
+                    Provider generating... may take 2-5 min. We'll reconcile automatically.
+                  </p>
+                )}
+                
                 {job.errorReason && (
                   <p className="text-xs text-destructive mb-2">
                     {job.errorReason}

@@ -10,6 +10,113 @@ import { randomUUID } from "crypto";
 import { sql, desc } from "drizzle-orm";
 import { db } from "./db";
 
+// In-memory polling controllers
+const pollingControllers = new Map<string, { controller: AbortController; attempts: number }>();
+
+// Polling function for taskId status
+async function startPolling(taskId: string) {
+  if (pollingControllers.has(taskId)) {
+    console.log(`[POLLING] Already polling for taskId: ${taskId}`);
+    return;
+  }
+
+  const controller = new AbortController();
+  pollingControllers.set(taskId, { controller, attempts: 0 });
+
+  const poll = async () => {
+    const pollingInfo = pollingControllers.get(taskId);
+    if (!pollingInfo || pollingInfo.controller.signal.aborted) {
+      return;
+    }
+
+    pollingInfo.attempts++;
+
+    try {
+      // Check if job is already READY or FAILED (webhook might have arrived)
+      const job = await storage.getJob(taskId);
+      if (!job || job.status === 'READY' || job.status === 'FAILED') {
+        pollingControllers.delete(taskId);
+        console.log(`[POLLING] Stopping for taskId: ${taskId}, status: ${job?.status || 'not found'}`);
+        return;
+      }
+
+      console.log(JSON.stringify({
+        stage: "poll",
+        taskId: taskId,
+        attempt: pollingInfo.attempts,
+        status: "processing",
+        hasUrls: false
+      }));
+
+      // Call Kie.ai record-info endpoint
+      const recordInfo = await kieService.getRecordInfo(taskId);
+      
+      if (recordInfo.data?.info?.resultUrls && recordInfo.data.info.resultUrls.length > 0) {
+        // Success - update video and job status
+        await storage.updateVideo(taskId, {
+          providerVideoUrl: recordInfo.data.info.resultUrls[0],
+          resolution: recordInfo.data.info.resolution || "1080p",
+          fallbackFlag: recordInfo.data.fallbackFlag || false,
+        });
+        await storage.updateJobStatus(taskId, 'READY', undefined);
+        
+        console.log(JSON.stringify({
+          stage: "poll",
+          taskId: taskId,
+          attempt: pollingInfo.attempts,
+          status: "ready",
+          hasUrls: true
+        }));
+        
+        pollingControllers.delete(taskId);
+        return;
+      }
+
+      // Check if we should continue polling (max 10 minutes = 30 attempts * 20s)
+      if (pollingInfo.attempts >= 30) {
+        await storage.updateJobStatus(taskId, 'FAILED', 'Polling timeout - video generation took too long');
+        console.log(JSON.stringify({
+          stage: "poll",
+          taskId: taskId,
+          attempt: pollingInfo.attempts,
+          status: "failed",
+          hasUrls: false
+        }));
+        pollingControllers.delete(taskId);
+        return;
+      }
+
+      // Continue polling after 20 seconds
+      setTimeout(poll, 20000);
+    } catch (error) {
+      console.error(`[POLLING] Error for taskId: ${taskId}`, error);
+      
+      if (pollingInfo.attempts >= 30) {
+        const errorMessage = (error as Error).message || 'Unknown polling error';
+        const truncatedError = errorMessage.length > 1000 ? errorMessage.substring(0, 1000) + '...[truncated]' : errorMessage;
+        await storage.updateJobStatus(taskId, 'FAILED', truncatedError);
+        
+        console.log(JSON.stringify({
+          stage: "poll",
+          taskId: taskId,
+          attempt: pollingInfo.attempts,
+          status: "failed",
+          hasUrls: false
+        }));
+        
+        pollingControllers.delete(taskId);
+        return;
+      }
+      
+      // Continue polling after error
+      setTimeout(poll, 20000);
+    }
+  };
+
+  // Start first poll after 20 seconds
+  setTimeout(poll, 20000);
+}
+
 const rateLimit = new Map<string, { count: number; resetTime: number }>();
 
 function rateLimitMiddleware(maxRequests: number = 5, windowMs: number = 60000) {
@@ -108,8 +215,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         validatedData.aspectRatio = "9:16"; // Override to default
       }
       
-      // Generate random seeds if not provided (Kie.ai requires 10000-99999 range)
-      const seeds = validatedData.seeds ?? Math.floor(Math.random() * 90000) + 10000;
+      // Generate random seeds if not provided (Kie.ai requires 10000-999999 range)
+      const seeds = validatedData.seeds ?? Math.floor(Math.random() * 990000) + 10000;
       
       // Ensure prompt is in English (basic heuristic)
       if (validatedData.prompt.includes('ñ') || validatedData.prompt.includes('á') || validatedData.prompt.includes('é')) {
@@ -175,7 +282,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const kieTaskId = kieResponse.data.taskId.trim();
         await storage.updateJobTaskId(taskId, kieTaskId);
         await storage.updateVideoTaskId(taskId, kieTaskId);
-        await storage.updateJobStatus(kieTaskId, 'QUEUED'); // Changed to QUEUED as per requirements
+        await storage.updateJobStatus(kieTaskId, 'PROCESSING'); // Set to PROCESSING after getting taskId
+        
+        // Start polling as backup for webhook
+        startPolling(kieTaskId);
         
         // Structured logging for successful creation
         console.log(JSON.stringify({
@@ -263,6 +373,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Error - update job status with error
           await storage.updateJobStatus(normalizedTaskId, 'FAILED', callbackData.msg);
         }
+        
+        // Stop polling if it's active (webhook arrived)
+        const pollingInfo = pollingControllers.get(normalizedTaskId);
+        if (pollingInfo) {
+          pollingInfo.controller.abort();
+          pollingControllers.delete(normalizedTaskId);
+          console.log(`[POLLING] Stopped polling for taskId: ${normalizedTaskId} due to webhook`);
+        }
       }
 
       // Update video if we have success data
@@ -298,6 +416,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("[VEO-CALLBACK] Processing error:", error);
       res.status(200).json({ message: "Callback received but processing failed" });
+    }
+  });
+
+  // Status endpoint for Kie.ai task checking (development only)
+  app.get('/api/veo/status/:taskId', async (req: Request, res: Response) => {
+    try {
+      // Only available in development
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(404).json({ message: 'Not found' });
+      }
+      
+      const taskId = req.params.taskId;
+      if (!taskId) {
+        return res.status(400).json({ message: 'TaskId parameter required' });
+      }
+      
+      // Call Kie.ai record-info endpoint  
+      const recordInfo = await kieService.getRecordInfo(taskId);
+      
+      res.json({
+        providerStatus: recordInfo,
+        resultUrls: recordInfo.data?.info?.resultUrls || [],
+        resolution: recordInfo.data?.info?.resolution || null,
+        fallbackFlag: recordInfo.data?.fallbackFlag || false,
+        lastUpdated: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Status check error:', error);
+      res.status(500).json({ 
+        error: 'Failed to fetch status',
+        message: (error as Error).message 
+      });
     }
   });
 
