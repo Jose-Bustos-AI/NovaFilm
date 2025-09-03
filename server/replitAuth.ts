@@ -57,13 +57,27 @@ function updateUserSession(
 async function upsertUser(
   claims: any,
 ) {
+  const userId = claims["sub"];
+  
+  // Check if user already exists
+  const existingUser = await storage.getUser(userId);
+  const isNewUser = !existingUser;
+  
+  // Upsert user data
   await storage.upsertUser({
-    id: claims["sub"],
+    id: userId,
     email: claims["email"],
     firstName: claims["first_name"],
     lastName: claims["last_name"],
     profileImageUrl: claims["profile_image_url"],
   });
+  
+  // Give welcome credits to new users
+  if (isNewUser) {
+    const welcomeCredits = 5; // 5 free videos for new users
+    await storage.addWelcomeCredits(userId, welcomeCredits);
+    console.log(`[AUTH] New user ${userId} created with ${welcomeCredits} welcome credits`);
+  }
 }
 
 export async function setupAuth(app: Express) {
@@ -127,10 +141,32 @@ export async function setupAuth(app: Express) {
   });
 }
 
+// Helper function to get userId from either local session or Replit auth
+export function getUserId(req: any): string | null {
+  // Check local session first
+  if (req.session?.userId) {
+    return req.session.userId;
+  }
+  
+  // Check Replit auth
+  if (req.user?.claims?.sub) {
+    return req.user.claims.sub;
+  }
+  
+  return null;
+}
+
 export const isAuthenticated: RequestHandler = async (req, res, next) => {
+  const session = (req as any).session;
   const user = req.user as any;
 
-  if (!req.isAuthenticated() || !user.expires_at) {
+  // Check for local auth session first (priority)
+  if (session?.userId) {
+    return next();
+  }
+
+  // Check for Replit auth session
+  if (!req.isAuthenticated() || !user || !user.expires_at) {
     return res.status(401).json({ message: "Unauthorized" });
   }
 

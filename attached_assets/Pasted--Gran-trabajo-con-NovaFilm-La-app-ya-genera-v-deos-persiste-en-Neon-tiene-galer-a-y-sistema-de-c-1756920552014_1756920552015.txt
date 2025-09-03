@@ -1,0 +1,145 @@
+¡Gran trabajo con NovaFilm!
+
+La app ya genera vídeos, persiste en Neon, tiene galería y sistema de créditos. Ahora toca elevar el login: necesitamos autenticación real con Neon (Stack Auth), para dejar atrás el login de Replit y solucionar el error de “Cerrar sesión”.
+
+🧠 Contexto
+
+Hoy el login es de Replit Auth y las sesiones se guardan en connect-pg-simple.
+
+La tabla users ya existe y guardamos créditos, nombre, avatar, etc.
+
+Queremos multiusuario completo con Neon Stack Auth (Google/GitHub + email), RLS activado, y que cada usuario vea solo sus vídeos/creditos.
+
+Debe mantenerse todo lo que funciona (generación, callbacks, créditos, galería, miniaturas cuando las añadamos, etc).
+
+🔒 REGLA DE ORO (no se puede romper nada)
+
+No rompas la generación de vídeos, la galería, ni el consumo de créditos.
+
+Mantén compatibilidad hacia atrás con datos ya existentes en users, jobs, videos, sessions/credits_history.
+
+Cualquier cambio en API debe preservar los endpoints actuales o exponer wrappers compatibles.
+
+✅ Instrucciones (paso a paso)
+
+Conectar Neon Stack Auth
+
+Integra Neon Stack Auth (Auth de Neon) como proveedor de identidad.
+
+Habilita Google y GitHub como mínimo, y email magic link si es trivial.
+
+Variables de entorno nuevas esperadas (añádelas a .env + README):
+
+NEON_DATABASE_URL (ya la tenemos),
+
+AUTH_JWT_SECRET o equivalentes de Stack Auth,
+
+AUTH_URL (callback base),
+
+AUTH_GOOGLE_CLIENT_ID/SECRET, AUTH_GITHUB_CLIENT_ID/SECRET.
+
+Modelo de datos y migración
+
+Reutiliza la tabla users actual. Si Stack Auth trae su tabla de identidades, mapea su user_id → users.id (o guarda el external_id en una columna auth_provider_id).
+
+Asegúrate de que al registrarse por primera vez se cree fila en users con: id, email, first_name, last_name, profile_image_url, credits (iniciales = 10; conserva si ya existían).
+
+Si el usuario ya existía por Replit, haz upsert por email.
+
+RLS y aislamiento
+
+Activa Row Level Security y políticas:
+
+users: el usuario puede leer/actualizar solo su fila.
+
+videos, jobs, credits_history: solo filas donde user_id = auth.uid().
+
+Mantén índices necesarios (user_id, task_id) y no cambies claves actuales.
+
+Sesiones y logout
+
+Sustituye express-session + connect-pg-simple por la gestión de sesión de Stack Auth (JWT/Session cookie según SDK).
+
+Expón rutas:
+
+GET /api/auth/me → perfil + créditos.
+
+POST /api/auth/logout → debe borrar sesión/cookie de Stack Auth.
+
+Arregla el botón “Cerrar sesión” para que llame a la nueva ruta y confirme con toast “Sesión cerrada”.
+
+Protección de rutas/acciones
+
+Middleware isAuthenticated actualizado a Stack Auth (verifica sesión/JWT).
+
+Protege: /api/create-job, /api/refine-prompt, /api/videos, /api/jobs, /api/account/*.
+
+Si no hay sesión, responde 401 con mensaje en español coherente con la UI.
+
+Front-end (sin romper nada)
+
+Reemplaza el flujo de login actual por Neon Auth (Google/GitHub + email).
+
+Mi Cuenta: sigue mostrando perfil, créditos y botón “Cerrar sesión” con la nueva API.
+
+Dashboard: conserva el badge de créditos y el bloqueo de generación si créditos = 0.
+
+Créditos y consumo
+
+Mantén el descuento de 1 crédito por video en create-job (transacción con videos/jobs).
+
+En usuarios nuevos vía Neon Auth: asigna 10 créditos de bienvenida.
+
+No dupliques saldos en migración (upsert por email).
+
+Callbacks y ownership
+
+En /api/veo-callback, al cerrar un video: valida que el task_id corresponda al user_id dueño del job.
+
+No cambies el pipeline de idempotencia; solo asegura que el user scope se respeta con el nuevo auth.
+
+Configuración/Docs
+
+Añade al README sección “Auth con Neon”:
+
+cómo crear credenciales Google/GitHub,
+
+variables de entorno,
+
+cómo probar en desarrollo (URL de callback),
+
+comando de migraciones.
+
+Muestra en logs (modo dev) el auth_provider y userId con cuidado de no loggear tokens.
+
+Pruebas y criterios de aceptación
+
+Login con Google y GitHub → crea/actualiza users y pone 10 créditos si es nuevo.
+
+Logout funciona (cookie/JWT invalidado), sin errores en UI.
+
+Con dos cuentas distintas: cada una ve solo sus propios vídeos/jobs/creditos.
+
+Intentar crear video sin sesión → 401.
+
+Intentar crear video con créditos = 0 → 402/422 con mensaje claro.
+
+Webhooks de Kie.ai siguen actualizando vídeos al dueño correcto.
+
+RLS: consultas directas a Neon no permiten filtrar datos de otros usuarios.
+
+No-regresiones
+
+No toques nada de generación, seeds, parsers, tiempos ni estilos.
+
+Mantén endpoints actuales y tipos de respuesta para que el front no falle.
+
+cuando termines, dime:
+
+variables nuevas añadidas,
+
+migraciones ejecutadas,
+
+qué se eliminó del viejo Replit Auth,
+
+y pega 3 pruebas manuales que hiciste (login, logout, creación video con descuento).

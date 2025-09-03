@@ -1,18 +1,57 @@
+import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { AuthModal } from "@/components/auth-modal";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 
 export default function Sidebar() {
   const { user } = useAuth();
   const [location, navigate] = useLocation();
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const logoutMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest('POST', '/api/auth/logout', {});
+      if (!response.ok) {
+        throw new Error('Error al cerrar sesión');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+      queryClient.clear(); // Clear all cached data
+      
+      toast({
+        title: "Sesión cerrada",
+        description: "Has cerrado sesión exitosamente.",
+      });
+      
+      // Force navigate to home
+      navigate('/');
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "No se pudo cerrar la sesión. Intenta de nuevo.",
+        variant: "destructive"
+      });
+    },
+  });
 
   const handleLogout = () => {
-    window.location.href = "/api/logout";
+    logoutMutation.mutate();
   };
 
   const navigation = [
     { name: 'Dashboard', path: '/', icon: 'M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2-2z' },
     { name: 'Gallery', path: '/gallery', icon: 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z' },
+    { name: 'Mi Cuenta', path: '/account', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' },
   ];
 
   return (
@@ -52,44 +91,73 @@ export default function Sidebar() {
       </div>
       
       <div className="absolute bottom-6 left-6 right-6">
-        <div className="bg-muted rounded-lg p-4">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-8 h-8 bg-gradient-to-br from-primary to-emerald-400 rounded-full flex items-center justify-center text-white text-sm font-medium overflow-hidden">
-              {(user as any)?.profileImageUrl ? (
-                <img 
-                  src={(user as any).profileImageUrl} 
-                  alt="Profile" 
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <span>{(user as any)?.firstName?.[0] || (user as any)?.email?.[0] || 'U'}</span>
-              )}
+        {user ? (
+          <div className="bg-muted rounded-lg p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-8 h-8 bg-gradient-to-br from-primary to-emerald-400 rounded-full flex items-center justify-center text-white text-sm font-medium overflow-hidden">
+                {(user as any)?.profileImageUrl ? (
+                  <img 
+                    src={(user as any).profileImageUrl} 
+                    alt="Profile" 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span>{(user as any)?.firstName?.[0] || (user as any)?.email?.[0] || 'U'}</span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-sm truncate" data-testid="text-username">
+                  {(user as any)?.firstName && (user as any)?.lastName 
+                    ? `${(user as any).firstName} ${(user as any).lastName}`
+                    : (user as any)?.email || 'User'
+                  }
+                </p>
+                <p className="text-xs text-muted-foreground truncate" data-testid="text-email">
+                  {(user as any)?.email || 'user@example.com'}
+                </p>
+              </div>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="font-medium text-sm truncate" data-testid="text-username">
-                {(user as any)?.firstName && (user as any)?.lastName 
-                  ? `${(user as any).firstName} ${(user as any).lastName}`
-                  : (user as any)?.email || 'User'
-                }
-              </p>
-              <p className="text-xs text-muted-foreground truncate" data-testid="text-email">
-                {(user as any)?.email || 'user@example.com'}
-              </p>
-            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleLogout}
+              disabled={logoutMutation.isPending}
+              className="w-full justify-start text-muted-foreground hover:text-foreground px-0"
+              data-testid="button-logout"
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              {logoutMutation.isPending ? "Cerrando..." : "Cerrar Sesión"}
+            </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleLogout}
-            className="w-full justify-start text-muted-foreground hover:text-foreground px-0"
-            data-testid="button-logout"
-          >
-            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-            Sign out
-          </Button>
-        </div>
+        ) : (
+          <div className="bg-muted rounded-lg p-4">
+            <p className="text-sm text-muted-foreground mb-3 text-center">
+              Inicia sesión para acceder a todas las funciones
+            </p>
+            <Button
+              onClick={() => setShowAuthModal(true)}
+              className="w-full"
+              data-testid="button-auth"
+            >
+              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Entrar / Registrarse
+            </Button>
+          </div>
+        )}
+
+        <AuthModal 
+          open={showAuthModal} 
+          onOpenChange={setShowAuthModal}
+          onAuthSuccess={() => {
+            // Refresh user data after successful auth
+            queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+            queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+          }}
+        />
       </div>
     </div>
   );

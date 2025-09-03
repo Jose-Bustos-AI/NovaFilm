@@ -6,6 +6,8 @@ import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { isUnauthorizedError } from "@/lib/authUtils";
+import { useAuth } from "@/hooks/useAuth";
+import { AuthModal } from "@/components/auth-modal";
 
 interface Message {
   role: 'user' | 'assistant';
@@ -24,6 +26,8 @@ interface RefinedPrompt {
 }
 
 export default function ChatInterface() {
+  const { user } = useAuth();
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
@@ -181,6 +185,12 @@ export default function ChatInterface() {
         aspectRatio: refinedPrompt.aspectRatio,
         seeds: refinedPrompt.seeds,
       });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Error en generación');
+      }
+      
       return await response.json();
     },
     onSuccess: (data) => {
@@ -189,9 +199,10 @@ export default function ChatInterface() {
         description: "Tu video se está procesando. Suele tardar 2-5 minutos.",
       });
       
-      // Refresh videos and jobs
+      // Refresh videos, jobs, and credits
       queryClient.invalidateQueries({ queryKey: ['/api/videos'] });
       queryClient.invalidateQueries({ queryKey: ['/api/jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
       
       // Add ETA message to chat
       setMessages(prev => [...prev, {
@@ -217,11 +228,23 @@ export default function ChatInterface() {
         return;
       }
       
+      // Check if it's a credits error
+      const errorMessage = error.message || "No se pudo iniciar la generación del video. Inténtalo de nuevo.";
+      
       toast({
-        title: "Error en Generación",
-        description: "No se pudo iniciar la generación del video. Inténtalo de nuevo.",
+        title: errorMessage.includes('créditos') ? "Sin Créditos" : "Error en Generación",
+        description: errorMessage,
         variant: "destructive",
       });
+      
+      // If it's a credits error, add helpful message to chat
+      if (errorMessage.includes('créditos')) {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `¡Oh no! Se te han acabado los créditos. Ve a "Mi Cuenta" para añadir más créditos y seguir creando videos increíbles.`,
+          timestamp: new Date()
+        }]);
+      }
       
       // Reset chat mode on error
       setChatMode('idle');
@@ -298,6 +321,17 @@ export default function ChatInterface() {
 
   const handleSend = () => {
     if (!input.trim() || chatMutation.isPending) return;
+
+    // Check if user is authenticated
+    if (!user) {
+      setShowAuthModal(true);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "Para generar videos necesitas iniciar sesión. ¡Te espero del otro lado! 🚀",
+        timestamp: new Date()
+      }]);
+      return;
+    }
 
     const userMessage = input.trim();
     setMessages(prev => [...prev, {
@@ -478,6 +512,16 @@ export default function ChatInterface() {
           </div>
         </div>
       </CardContent>
+      
+      <AuthModal 
+        open={showAuthModal} 
+        onOpenChange={setShowAuthModal}
+        onAuthSuccess={() => {
+          // Refresh user data after successful auth
+          queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+          queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+        }}
+      />
     </Card>
   );
 }

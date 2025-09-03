@@ -5,6 +5,7 @@ import Sidebar from "@/components/sidebar";
 import ChatInterface from "@/components/chat-interface";
 import JobStatus from "@/components/job-status";
 import VideoGallery from "@/components/video-gallery";
+import { CreditsIndicator } from "@/components/credits-indicator";
 import { useQuery } from "@tanstack/react-query";
 import { isUnauthorizedError } from "@/lib/authUtils";
 
@@ -21,7 +22,7 @@ export default function Dashboard() {
         variant: "destructive",
       });
       setTimeout(() => {
-        window.location.href = "/api/login";
+        window.location.href = "/";
       }, 500);
       return;
     }
@@ -101,10 +102,7 @@ export default function Dashboard() {
               <p className="text-muted-foreground">Manage your AI video generation projects</p>
             </div>
             <div className="flex items-center gap-4">
-              <div className="bg-emerald-500/10 text-emerald-400 px-3 py-1 rounded-full text-sm font-medium">
-                <div className="w-2 h-2 bg-emerald-500 rounded-full inline-block mr-2"></div>
-                5 Credits Available
-              </div>
+              <CreditsIndicator />
             </div>
           </div>
         </header>

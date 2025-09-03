@@ -1,0 +1,104 @@
+Felicitaciones
+
+¡Registro y sesión local están funcionando! 👏 Ahora vamos a rematar el Logout para que cierre sesión de forma fiable en todos los casos.
+
+🧠 Contexto
+
+Autenticación actual: solo local (email/contraseña) con express-session + connect-pg-simple.
+
+Cookie de sesión en Postgres (Neon).
+
+El botón “Cerrar sesión” muestra error y la sesión no se invalida del todo.
+
+🛡️ Regla de oro
+
+No toques ni rompas nada del flujo actual (registro, login, créditos, generación, galería).
+No re-actives Replit Auth. Solo corrige el cierre de sesión y la limpieza de la cookie/registro en la store.
+
+✅ Instrucciones
+1) Backend – Ruta de logout sólida
+
+Usar método POST en /api/auth/logout.
+Nada de redirects; responder con JSON { ok: true } aunque no hubiera sesión.
+
+Destruir la sesión en la store:
+
+Llamar a req.session.destroy(...) y esperar a que complete.
+
+Si fuese necesario, llamar explícitamente a sessionStore.destroy(req.sessionID) como respaldo.
+
+Limpiar la cookie:
+
+Hacer clearCookie usando exactamente los mismos atributos (nombre, path, sameSite, secure, domain) con los que se creó.
+
+En producción: secure: true y sameSite: "none" (HTTPS).
+
+En desarrollo: secure: false y sameSite: "lax".
+
+Proxy y dominio:
+
+En prod, app.set("trust proxy", 1) para que secure funcione detrás de proxy.
+
+Si no se está fijando domain en la cookie, no lo añadas al limpiar; si lo fijas, usa el mismo valor en clearCookie.
+
+CORS/Credentials:
+
+Mantén Access-Control-Allow-Credentials: true y origen permitido.
+
+No envíes Vary: * ni cambies los headers actuales.
+
+Evitar recreación de sesión:
+
+Después de destroy, no escribas nada más en req.session en ese request.
+
+Asegúrate de que ningún middleware (p. ej. un “ensureUser”) escriba la sesión tras destruirla.
+
+Manejo de errores:
+
+Log estructurado si falla destroy (incluye sessionID).
+
+La ruta debe devolver { ok: true } igualmente para UX consistente, pero loguear el error para depurar.
+
+2) Frontend – Llamada y estado
+
+El botón Cerrar sesión debe hacer POST /api/auth/logout con credentials: "include" (si usas fetch/axios, asegúrate de que SIEMPRE envíe cookies).
+
+En éxito:
+
+Vaciar el estado de usuario en el cliente (store/context).
+
+Ocultar “Mi Cuenta” y mostrar “Entrar / Registrarse”.
+
+Redirigir a / o refrescar la página.
+
+UI/UX:
+
+Deshabilitar el botón mientras está en curso.
+
+Mostrar toast “Sesión cerrada”.
+
+3) Pruebas que deben pasar (checklist)
+
+ Hago login ➜ aparece el usuario y créditos.
+
+ Clic en Cerrar sesión ➜ no queda cookie de sesión del dominio (comprueba en devtools).
+
+ GET /api/auth/user devuelve 401 tras el logout.
+
+ La store de Postgres ya no tiene el sessionID destruido.
+
+ Intentar generar video tras logout ➜ bloquea, abre modal de login.
+
+ Volver a iniciar sesión ➜ todo sigue funcionando (créditos, galería, generación).
+
+4) Diagnóstico rápido (por si persiste)
+
+Verifica nombre de la cookie: usa el mismo tanto al crear como al limpiar.
+
+Revisa sameSite/secure/domain/path: si difieren, la cookie no se borra.
+
+Confirma trust proxy en prod.
+
+Comprueba que el frontend envía credentials al llamar a logout.
+
+Asegura que no existe ningún res.redirect(...) en la ruta de logout.

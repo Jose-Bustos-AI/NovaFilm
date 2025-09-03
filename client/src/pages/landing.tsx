@@ -1,9 +1,15 @@
+import { useState } from "react";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { AuthModal } from "@/components/auth-modal";
 
 export default function Landing() {
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [, navigate] = useLocation();
+
   const handleLogin = () => {
-    window.location.href = "/api/login";
+    setShowAuthModal(true);
   };
 
   return (
@@ -85,6 +91,15 @@ export default function Landing() {
           </p>
         </div>
       </div>
+      
+      <AuthModal
+        open={showAuthModal}
+        onOpenChange={setShowAuthModal}
+        onAuthSuccess={() => {
+          setShowAuthModal(false);
+          navigate('/');
+        }}
+      />
     </div>
   );
 }

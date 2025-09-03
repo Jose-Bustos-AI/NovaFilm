@@ -1,0 +1,152 @@
+Contexto
+
+La app ya funciona: multiusuario, créditos, galería y generación OK.
+
+Ahora queremos desacoplar totalmente Replit Auth para que SIEMPRE se use el sistema propio de email/contraseña, tanto en Preview como en deploy.
+
+Mantén compatibilidad con usuarios ya creados (vía Replit o locales).
+
+🛡️ Regla de oro
+
+No rompas nada que ya funciona.
+Nada de regresiones en generación de videos, créditos, sesión, rutas o UI. Si algo depende de Replit Auth, debe tener un reemplazo equivalente con el sistema local.
+
+✅ Instrucciones
+1) Desactivar Replit Auth (backend)
+
+Elimina/Desmonta cualquier middleware, inicialización o rutas de Replit Auth:
+
+No montes rutas tipo /api/login / /api/callback de Replit.
+
+No uses passport de Replit en el pipeline.
+
+Deja activo solo express-session con connect-pg-simple (ya lo estamos usando):
+
+Confirma que la cookie y la store en Postgres siguen activas.
+
+isAuthenticated: Asegúrate de que la versión local valida req.session.user (no tokens de Replit).
+
+CORS y cookies:
+
+Habilita credentials: true en el servidor y withCredentials en el cliente.
+
+cookie con sameSite: "lax" en desarrollo y secure: true + sameSite: "none" en producción con HTTPS.
+
+2) Modo de autenticación: solo local
+
+Añade variable de control: AUTH_PROVIDER=local.
+
+Si local, nunca renderices botones de Replit ni llames a endpoints de Replit.
+
+Endpoints activos (ya existen, solo asegurar wiring):
+
+POST /api/auth/register → crea usuario con password_hash (argon2) + 10 créditos de bienvenida.
+
+POST /api/auth/login → valida credenciales, establece req.session.user.
+
+POST /api/auth/logout → destruye sesión.
+
+GET /api/auth/user → devuelve el perfil del usuario autenticado.
+
+Rate limiting:
+
+Mantén 10 intentos/10min para /login y /register.
+
+3) Migración de usuarios Replit (compatibilidad)
+
+No borres columnas/filas existentes.
+
+Si existe usuario con email previo (creado por Replit) y no tiene password_hash:
+
+Permite “Establecer contraseña” desde Mi Cuenta → crea password_hash y a partir de ahí ya entra solo con email/contraseña.
+
+Primera vinculación: si intenta login local con email que existe sin password_hash, devuelve mensaje:
+“Esta cuenta se creó con otro método. Establece una contraseña en Mi Cuenta.”
+
+4) UI (frontend)
+
+Sidebar / Header:
+
+Reemplaza “Entrar con Replit” por un botón “Entrar / Registrarse” que abre el modal propio.
+
+Cuando hay sesión: muestra avatar + menú (Mi cuenta, Cerrar sesión).
+
+Modal Auth propio (ya lo tienes):
+
+Tabs: Iniciar sesión | Crear cuenta.
+
+Validación en cliente + mensajes claros.
+
+Mi Cuenta:
+
+Mantener: nombre, apellidos, avatar, créditos.
+
+Añadir/Confirmar: sección Cambiar contraseña y si el usuario viene de Replit sin pass, botón Establecer contraseña (usa el mismo flujo).
+
+Protección de acciones:
+
+Si no hay sesión → bloquea generación y abre modal auth.
+
+Indicador de créditos sigue visible.
+
+5) Variables de entorno
+
+Quitar claves de Replit Auth si existían (o ignorarlas).
+
+Mantener/añadir:
+
+AUTH_PROVIDER=local
+
+SESSION_SECRET=<tu_secret_seguro>
+
+BASE_URL=<url pública o preview>
+
+DATABASE_URL (Neon)
+
+(Opcional prod) COOKIE_SECURE=true, COOKIE_SAMESITE=none
+
+No pidas claves de Google/GitHub ahora (lo haremos más adelante).
+
+6) Seguridad
+
+Hash con argon2 y validaciones robustas (min longitudes, emails, etc).
+
+CSRF opcional: si ya tienes SameSite correcto, posponer; no lo introduzcas si complica cookies ahora.
+
+XSS/escape en formularios.
+
+No expongas password_hash ni datos sensibles en /api/auth/user.
+
+7) Pruebas de humo (debe pasar todo)
+
+Con AUTH_PROVIDER=local, no aparece el popup de Replit ni botones de Replit.
+
+Registro con email/contraseña → sesión creada + 10 créditos → dashboard muestra créditos.
+
+Login/Logout funcionan (la cookie se borra) sin errores.
+
+“Mi Cuenta” permite cambiar contraseña y establecer contraseña si venías de Replit.
+
+Generar video: descuenta 1 crédito y respeta aislamiento por usuario.
+
+Galería: cada usuario ve solo sus videos.
+
+Webhooks de Kie.ai siguen aterrizando y relacionando por user_id correcto.
+
+8) Despliegue
+
+En Vercel u otro hosting, asegura:
+
+SESSION_SECRET definido.
+
+Dominio HTTPS para secure cookies.
+
+CORS/credentials OK entre front y API.
+
+Configura AUTH_PROVIDER=local en el entorno de producción.
+
+9) Rollback plan
+
+Si algo falla: poner AUTH_PROVIDER=replit y volver a montar las rutas Replit (sin borrar nada local).
+
+Mantén el código de Replit Auth aislado detrás de la variable de entorno para alternar rápido si es necesario.

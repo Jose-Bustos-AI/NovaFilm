@@ -261,20 +261,22 @@ export default function VideoGallery({ videos, isLoading, showAllVideos = false 
                   onClick={() => setSelectedVideo(video)}
                   data-testid={`card-video-${video.id}`}
                 >
-                  <div className="relative">
+                  <div className="relative w-full h-48">
                     {video.thumbnail ? (
                       <img 
                         src={video.thumbnail} 
                         alt={video.title || `Video ${video.taskId.slice(-8)}`}
-                        className="w-full h-48 object-cover"
+                        className="absolute inset-0 w-full h-full object-cover"
+                        style={{ zIndex: 10 }}
                         onError={(e) => {
-                          // Fallback to styled preview if thumbnail fails to load
+                          // Hide thumbnail and show fallback
                           e.currentTarget.style.display = 'none';
-                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
                         }}
                       />
                     ) : null}
-                    <div className={`w-full h-48 relative overflow-hidden ${video.thumbnail ? 'hidden' : ''}`}>
+                    
+                    {/* Fallback content - shows when no thumbnail or thumbnail fails */}
+                    <div className="absolute inset-0 w-full h-full">
                       {/* Dynamic gradient based on video content */}
                       <div className="absolute inset-0 bg-gradient-to-br from-blue-500/30 via-purple-500/20 to-pink-500/30"></div>
                       <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent"></div>
