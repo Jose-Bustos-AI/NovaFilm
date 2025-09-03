@@ -5,7 +5,7 @@ import { setupAuth, isAuthenticated } from "./replitAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { sql, desc } from "drizzle-orm";
@@ -258,12 +258,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       console.log(`[CALLBACK-URL] Using: ${callBackUrl}`);
       
-      // Create job and video records
-      await storage.createJob({
+      // Create job and video records first (needed for credit consumption)
+      const newJob = await storage.createJob({
         userId,
         taskId,
         status: 'QUEUED',
       });
+
+      // Check and consume credits BEFORE calling Kie.ai
+      const creditsConsumed = await storage.consumeCredits(userId, newJob.id);
+      if (!creditsConsumed) {
+        // Delete the job since we can't proceed
+        await storage.updateJobStatus(taskId, 'FAILED', 'insufficient_credits');
+        
+        return res.status(400).json({ 
+          message: 'No te quedan créditos. Añade más para generar videos.' 
+        });
+      }
 
       await storage.createVideo({
         userId,
@@ -685,6 +696,119 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.error("Get jobs error:", error);
       res.status(500).json({ message: "Failed to fetch jobs" });
     }
+  });
+
+  // Account management routes
+  app.get('/api/account/me', isAuthenticated, async (req: any, res: Response) => {
+    try {
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      
+      if (!user) {
+        return res.status(404).json({ message: "Usuario no encontrado" });
+      }
+      
+      // Return safe user profile
+      const profile = {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        profileImageUrl: user.profileImageUrl,
+        plan: user.plan,
+        creditsRemaining: user.creditsRemaining,
+        subscriptionStatus: user.subscriptionStatus,
+        createdAt: user.createdAt
+      };
+      
+      res.json(profile);
+    } catch (error) {
+      console.error("Get user profile error:", error);
+      res.status(500).json({ message: "Error al obtener perfil de usuario" });
+    }
+  });
+
+  app.patch('/api/account/me', isAuthenticated, async (req: any, res: Response) => {
+    try {
+      const userId = req.user.claims.sub;
+      const validatedData = updateUserProfileSchema.parse(req.body);
+      
+      const updatedUser = await storage.updateUserProfile(userId, validatedData);
+      
+      const profile = {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        firstName: updatedUser.firstName,
+        lastName: updatedUser.lastName,
+        profileImageUrl: updatedUser.profileImageUrl,
+        plan: updatedUser.plan,
+        creditsRemaining: updatedUser.creditsRemaining,
+        subscriptionStatus: updatedUser.subscriptionStatus,
+        createdAt: updatedUser.createdAt
+      };
+      
+      res.json(profile);
+    } catch (error) {
+      console.error("Update user profile error:", error);
+      res.status(500).json({ message: "Error al actualizar perfil" });
+    }
+  });
+
+  app.get('/api/account/credits', isAuthenticated, async (req: any, res: Response) => {
+    try {
+      const userId = req.user.claims.sub;
+      const creditsRemaining = await storage.getUserCreditsBalance(userId);
+      const ledger = await storage.getUserCreditsHistory(userId, 50);
+      
+      res.json({
+        creditsRemaining,
+        ledger: ledger.map(entry => ({
+          delta: entry.delta,
+          reason: entry.reason,
+          jobId: entry.jobId,
+          createdAt: entry.createdAt
+        }))
+      });
+    } catch (error) {
+      console.error("Get credits error:", error);
+      res.status(500).json({ message: "Error al obtener información de créditos" });
+    }
+  });
+
+  app.post('/api/account/subscription/cancel', isAuthenticated, async (req: any, res: Response) => {
+    try {
+      const userId = req.user.claims.sub;
+      await storage.cancelSubscription(userId);
+      
+      res.json({
+        ok: true,
+        message: 'Suscripción cancelada. Mantienes acceso hasta fin de ciclo.'
+      });
+    } catch (error) {
+      console.error("Cancel subscription error:", error);
+      res.status(500).json({ message: "Error al cancelar suscripción" });
+    }
+  });
+
+  app.post('/api/logout', isAuthenticated, async (req: any, res: Response) => {
+    req.logout();
+    req.session.destroy((err: any) => {
+      if (err) {
+        console.error("Logout error:", err);
+        return res.status(500).json({ message: "Error al cerrar sesión" });
+      }
+      res.clearCookie('connect.sid');
+      res.json({ ok: true, message: 'Sesión cerrada exitosamente' });
+    });
+  });
+
+  // Placeholder for future billing integration
+  app.post('/api/billing/create-checkout', isAuthenticated, async (req: any, res: Response) => {
+    // Placeholder for Stripe integration
+    res.json({ 
+      url: '/pricing',
+      message: 'Próximamente: integración de pagos con Stripe' 
+    });
   });
 
   const httpServer = createServer(app);

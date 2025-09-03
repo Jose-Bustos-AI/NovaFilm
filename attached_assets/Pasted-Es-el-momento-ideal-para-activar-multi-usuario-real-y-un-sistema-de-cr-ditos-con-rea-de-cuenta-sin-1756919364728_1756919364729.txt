@@ -1,0 +1,183 @@
+Es el momento ideal para activar multi-usuario real y un sistema de créditos con área de cuenta, sin romper nada del flujo actual.
+
+🧠 Contexto
+
+Ahora mismo autenticamos con Replit Auth y guardamos sesión en sessions.
+
+Tenemos tablas users, videos, jobs y todo se filtra por user_id.
+
+Queremos:
+
+Que cada usuario solo vea sus propios videos.
+
+Créditos por usuario (p. ej. 1 crédito = 1 video).
+
+Página de Cuenta: créditos disponibles, historial básico, editar perfil (nombre, avatar), logout, y botón de cancelar suscripción (placeholder hasta integrar pagos).
+
+Preparar el terreno para Stripe (o similar) más adelante, sin bloquear la versión actual.
+
+🛑 Regla de oro (NO romper nada)
+
+Mantén Replit Auth tal como está (es decir, no cambies el proveedor de auth).
+
+Toda la lógica nueva debe ser compatible con lo existente: rutas, callbacks, polling, DB y UI actual.
+
+Si faltan datos o algo falla, debe degradar con gracia (nunca impedir la generación si hay créditos, nunca exponer datos de otros usuarios).
+
+✅ Instrucciones
+1) Esquema de base de datos (Drizzle / Neon)
+
+Extender users y crear tablas para créditos:
+
+users (añadir campos si no existen):
+
+plan text DEFAULT 'free'
+
+credits_remaining integer NOT NULL DEFAULT 0
+
+subscription_status text DEFAULT 'inactive' // valores: 'inactive' | 'trialing' | 'active' | 'canceled'
+
+stripe_customer_id text NULL
+
+canceled_at timestamp NULL
+
+updated_at timestamp NOT NULL DEFAULT now()
+
+credits_ledger (NUEVA):
+
+id uuid pk
+
+user_id varchar NOT NULL (fk → users.id)
+
+delta integer NOT NULL // +N recarga, −1 consumo
+
+reason text NOT NULL // 'video_generation' | 'manual_grant' | 'promo' | 'refund'
+
+job_id uuid NULL // opcional, enlazar al job si aplica
+
+created_at timestamp DEFAULT now()
+
+Índices por user_id, created_at.
+
+Migraciones: crear migración, aplicar con npm run db:push. No borres ni modifiques datos existentes.
+
+2) Semillas & compatibilidad
+
+En el login (o cuando se crea un usuario nuevo en users), si credits_remaining es NULL o 0 y es primera vez, asignar créditos de bienvenida (p. ej. 5).
+
+Registra también una fila en credits_ledger (+5, reason: promo).
+
+3) Consumo de créditos (transaccional)
+
+En POST /api/create-job:
+
+Antes de llamar a Kie.ai, inicia transacción:
+
+Leer users.credits_remaining FOR UPDATE.
+
+Si credits_remaining < 1 ⇒ 400 con mensaje en español: “No te quedan créditos. Añade más para generar videos.”
+
+Decrementar en 1 y insertar credits_ledger con delta = -1, reason = 'video_generation' y job_id (si ya tienes id) o actualizar luego.
+
+Commit.
+
+Si falla la llamada a Kie.ai, reversa el consumo (añadir +1 en ledger y sumar de nuevo al usuario) o haz el rollback completo si la transacción abarca todo.
+
+Importante: Mantener idempotencia en callbacks; no volver a consumir créditos en reintentos.
+
+4) Aislamiento y seguridad de datos
+
+Asegura que todas las rutas filtren por user_id:
+
+GET /api/videos, GET /api/jobs, etc. ya lo hacen: revísalo y añade where user_id = req.user.id en todos los casos.
+
+En el callback: la upsert por taskId debe conservar el user_id del job original; nunca aceptar un callback que asigne a otro usuario.
+
+5) API de Cuenta
+
+Nuevas rutas bajo /api/account (todas requieren auth):
+
+GET /api/account/me
+Devuelve perfil del usuario: { id, email, first_name, last_name, profile_image_url, plan, credits_remaining, subscription_status, created_at }.
+
+PATCH /api/account/me
+Permite actualizar first_name, last_name, profile_image_url. Validar con Zod.
+
+GET /api/account/credits
+Devuelve { credits_remaining, ledger: [ {delta, reason, job_id, created_at} ] } (limit 50, orden desc).
+
+POST /api/account/subscription/cancel (placeholder)
+
+Marca subscription_status = 'canceled', canceled_at = now().
+
+Devuelve { ok: true, message: 'Suscripción cancelada. Mantienes acceso hasta fin de ciclo.' }.
+
+No integra Stripe aún, solo deja el dato listo.
+
+POST /api/logout
+
+Cierra sesión Replit/express-session como ya haces.
+
+6) UI: Área de Cuenta
+
+Nueva página “Account / Mi Cuenta” accesible desde el sidebar o avatar:
+
+Resumen:
+
+Avatar, nombre, email.
+
+Créditos disponibles (grande).
+
+Estado de suscripción (badge: Free, Trial, Active, Canceled).
+
+Acciones:
+
+Botón “Añadir créditos” (placeholder → abre modal informativo hasta integrar Stripe).
+
+Botón “Cancelar suscripción” (llama al endpoint placeholder).
+
+Botón “Cerrar sesión”.
+
+Historial de créditos (tabla simple):
+
+Fecha, cambio (+/-), motivo, job_id (link a video si existe).
+
+Edición de perfil:
+
+Inputs para nombre/apellido y avatar (URL por ahora).
+
+Guardar con PATCH /api/account/me.
+
+Todo en español. Mantener la estética actual (cards, badges, toasts).
+
+7) Interacción con el dashboard
+
+Donde ya mostráis “Credits Left”, leer de users.credits_remaining (poll cada 60s o al finalizar un job).
+
+En el chat, si credits_remaining < 1, deshabilitar el botón Generar y mostrar aviso: “Sin créditos — Añade más para continuar.”
+
+8) Preparativos para pagos (sin integrar aún)
+
+En users dejamos stripe_customer_id y subscription_status.
+
+Crea un endpoint placeholder POST /api/billing/create-checkout que devuelva { url: '/pricing' } o algo neutro. Más adelante lo conectamos a Stripe.
+
+No bloquear ningún flujo por esto.
+
+9) Logs y métricas
+
+Añadir logs estructurados al consumir créditos y al cancelarse la suscripción.
+
+Añadir contadores simples (p. ej., videos_generados_hoy_por_usuario) en logs para monitorizar uso (no en DB).
+
+10) Pruebas de aceptación
+
+Usuario nuevo: recibe créditos de bienvenida y puede generar 1 video → créditos bajan 1 y ledger registra -1.
+
+Usuario sin créditos: botón de generar deshabilitado y API devuelve 400 amigable.
+
+Cada usuario ve solo sus videos/ledger.
+
+Editar perfil funciona y persiste.
+
+Cancelar suscripción cambia subscription_status y muestra el nuevo estado en la UI.

@@ -181,6 +181,12 @@ export default function ChatInterface() {
         aspectRatio: refinedPrompt.aspectRatio,
         seeds: refinedPrompt.seeds,
       });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Error en generación');
+      }
+      
       return await response.json();
     },
     onSuccess: (data) => {
@@ -189,9 +195,10 @@ export default function ChatInterface() {
         description: "Tu video se está procesando. Suele tardar 2-5 minutos.",
       });
       
-      // Refresh videos and jobs
+      // Refresh videos, jobs, and credits
       queryClient.invalidateQueries({ queryKey: ['/api/videos'] });
       queryClient.invalidateQueries({ queryKey: ['/api/jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
       
       // Add ETA message to chat
       setMessages(prev => [...prev, {
@@ -217,11 +224,23 @@ export default function ChatInterface() {
         return;
       }
       
+      // Check if it's a credits error
+      const errorMessage = error.message || "No se pudo iniciar la generación del video. Inténtalo de nuevo.";
+      
       toast({
-        title: "Error en Generación",
-        description: "No se pudo iniciar la generación del video. Inténtalo de nuevo.",
+        title: errorMessage.includes('créditos') ? "Sin Créditos" : "Error en Generación",
+        description: errorMessage,
         variant: "destructive",
       });
+      
+      // If it's a credits error, add helpful message to chat
+      if (errorMessage.includes('créditos')) {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: `¡Oh no! Se te han acabado los créditos. Ve a "Mi Cuenta" para añadir más créditos y seguir creando videos increíbles.`,
+          timestamp: new Date()
+        }]);
+      }
       
       // Reset chat mode on error
       setChatMode('idle');

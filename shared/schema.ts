@@ -9,6 +9,7 @@ import {
   uuid,
   pgEnum,
   boolean,
+  integer,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -31,6 +32,11 @@ export const users = pgTable("users", {
   firstName: varchar("first_name"),
   lastName: varchar("last_name"),
   profileImageUrl: varchar("profile_image_url"),
+  plan: text("plan").default('free'),
+  creditsRemaining: integer("credits_remaining").notNull().default(0),
+  subscriptionStatus: text("subscription_status").default('inactive'), // 'inactive' | 'trialing' | 'active' | 'canceled'
+  stripeCustomerId: text("stripe_customer_id"),
+  canceledAt: timestamp("canceled_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -60,6 +66,19 @@ export const videos = pgTable("videos", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Credits ledger for tracking credit transactions
+export const creditsLedger = pgTable("credits_ledger", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").references(() => users.id).notNull(),
+  delta: integer("delta").notNull(), // +N for addition, -1 for consumption
+  reason: text("reason").notNull(), // 'video_generation' | 'manual_grant' | 'promo' | 'refund'
+  jobId: uuid("job_id").references(() => jobs.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => [
+  index("idx_credits_ledger_user_id").on(table.userId),
+  index("idx_credits_ledger_created_at").on(table.createdAt),
+]);
+
 // Insert schemas
 export const insertJobSchema = createInsertSchema(jobs).omit({
   id: true,
@@ -71,10 +90,21 @@ export const insertVideoSchema = createInsertSchema(videos).omit({
   createdAt: true,
 });
 
+export const insertCreditsLedgerSchema = createInsertSchema(creditsLedger).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const createJobSchema = z.object({
   prompt: z.string().min(1, "Prompt is required"),
   aspectRatio: z.string().default("9:16"),
   seeds: z.number().min(10000).max(99999).nullable().optional(),
+});
+
+export const updateUserProfileSchema = z.object({
+  firstName: z.string().min(1).max(50).optional(),
+  lastName: z.string().min(1).max(50).optional(),
+  profileImageUrl: z.string().url().optional().or(z.literal('')),
 });
 
 // Types
@@ -85,3 +115,6 @@ export type Job = typeof jobs.$inferSelect;
 export type InsertVideo = z.infer<typeof insertVideoSchema>;
 export type Video = typeof videos.$inferSelect;
 export type CreateJobRequest = z.infer<typeof createJobSchema>;
+export type InsertCreditsLedger = z.infer<typeof insertCreditsLedgerSchema>;
+export type CreditsLedger = typeof creditsLedger.$inferSelect;
+export type UpdateUserProfile = z.infer<typeof updateUserProfileSchema>;

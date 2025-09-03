@@ -57,13 +57,27 @@ function updateUserSession(
 async function upsertUser(
   claims: any,
 ) {
+  const userId = claims["sub"];
+  
+  // Check if user already exists
+  const existingUser = await storage.getUser(userId);
+  const isNewUser = !existingUser;
+  
+  // Upsert user data
   await storage.upsertUser({
-    id: claims["sub"],
+    id: userId,
     email: claims["email"],
     firstName: claims["first_name"],
     lastName: claims["last_name"],
     profileImageUrl: claims["profile_image_url"],
   });
+  
+  // Give welcome credits to new users
+  if (isNewUser) {
+    const welcomeCredits = 5; // 5 free videos for new users
+    await storage.addWelcomeCredits(userId, welcomeCredits);
+    console.log(`[AUTH] New user ${userId} created with ${welcomeCredits} welcome credits`);
+  }
 }
 
 export async function setupAuth(app: Express) {
