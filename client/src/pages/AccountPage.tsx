@@ -45,6 +45,12 @@ export function AccountPage() {
     lastName: '',
     profileImageUrl: ''
   });
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
 
   // Fetch user profile
   const { data: profile, isLoading: profileLoading, error: profileError } = useQuery<UserProfile>({
@@ -131,6 +137,27 @@ export function AccountPage() {
     }
   });
 
+  // Change password mutation
+  const changePasswordMutation = useMutation({
+    mutationFn: (data: {currentPassword: string, newPassword: string}) => 
+      apiRequest('POST', '/api/account/change-password', data),
+    onSuccess: () => {
+      toast({
+        title: "Contraseña actualizada",
+        description: "Tu contraseña ha sido cambiada exitosamente."
+      });
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setShowPasswordForm(false);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error.message || "No se pudo cambiar la contraseña.",
+        variant: "destructive"
+      });
+    }
+  });
+
   const handleUpdateProfile = () => {
     const cleanData: any = {};
     if (editForm.firstName.trim()) cleanData.firstName = editForm.firstName.trim();
@@ -138,6 +165,31 @@ export function AccountPage() {
     if (editForm.profileImageUrl.trim()) cleanData.profileImageUrl = editForm.profileImageUrl.trim();
     
     updateProfileMutation.mutate(cleanData);
+  };
+
+  const handleChangePassword = () => {
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      toast({
+        title: "Error",
+        description: "Las contraseñas no coinciden.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (passwordForm.newPassword.length < 8) {
+      toast({
+        title: "Error", 
+        description: "La nueva contraseña debe tener al menos 8 caracteres.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    changePasswordMutation.mutate({
+      currentPassword: passwordForm.currentPassword,
+      newPassword: passwordForm.newPassword
+    });
   };
 
   const formatDate = (dateString: string) => {
@@ -306,6 +358,81 @@ export function AccountPage() {
                 data-testid="button-edit-profile"
               >
                 Editar Perfil
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Password Change Card */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Seguridad</CardTitle>
+            <CardDescription>
+              Cambia tu contraseña para mantener tu cuenta segura
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {showPasswordForm ? (
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="currentPassword">Contraseña Actual</Label>
+                  <Input
+                    id="currentPassword"
+                    type="password"
+                    value={passwordForm.currentPassword}
+                    onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
+                    placeholder="Ingresa tu contraseña actual"
+                    data-testid="input-current-password"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="newPassword">Nueva Contraseña</Label>
+                  <Input
+                    id="newPassword"
+                    type="password"
+                    value={passwordForm.newPassword}
+                    onChange={(e) => setPasswordForm({...passwordForm, newPassword: e.target.value})}
+                    placeholder="Mínimo 8 caracteres"
+                    data-testid="input-new-password"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="confirmPassword">Confirmar Nueva Contraseña</Label>
+                  <Input
+                    id="confirmPassword"
+                    type="password"
+                    value={passwordForm.confirmPassword}
+                    onChange={(e) => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
+                    placeholder="Repite la nueva contraseña"
+                    data-testid="input-confirm-password"
+                  />
+                </div>
+                <div className="flex space-x-2">
+                  <Button 
+                    onClick={handleChangePassword}
+                    disabled={changePasswordMutation.isPending || !passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword}
+                    data-testid="button-save-password"
+                  >
+                    {changePasswordMutation.isPending ? 'Cambiando...' : 'Cambiar Contraseña'}
+                  </Button>
+                  <Button 
+                    variant="outline"
+                    onClick={() => {
+                      setShowPasswordForm(false);
+                      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+                    }}
+                    data-testid="button-cancel-password"
+                  >
+                    Cancelar
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button 
+                onClick={() => setShowPasswordForm(true)}
+                data-testid="button-change-password"
+              >
+                Cambiar Contraseña
               </Button>
             )}
           </CardContent>

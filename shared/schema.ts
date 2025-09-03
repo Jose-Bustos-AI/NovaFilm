@@ -25,13 +25,14 @@ export const sessions = pgTable(
   (table) => [index("IDX_session_expire").on(table.expire)],
 );
 
-// User storage table for Replit Auth
+// User storage table for Replit Auth + Local Auth
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   email: varchar("email").unique(),
   firstName: varchar("first_name"),
   lastName: varchar("last_name"),
   profileImageUrl: varchar("profile_image_url"),
+  passwordHash: text("password_hash"), // For local auth - nullable for backward compatibility
   plan: text("plan").default('free'),
   creditsRemaining: integer("credits_remaining").notNull().default(0),
   subscriptionStatus: text("subscription_status").default('inactive'), // 'inactive' | 'trialing' | 'active' | 'canceled'
@@ -107,6 +108,24 @@ export const updateUserProfileSchema = z.object({
   profileImageUrl: z.string().url().optional().or(z.literal('')),
 });
 
+// Local auth schemas
+export const registerSchema = z.object({
+  email: z.string().email("Email válido requerido"),
+  password: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
+  firstName: z.string().min(1).max(50).optional(),
+  lastName: z.string().min(1).max(50).optional(),
+});
+
+export const loginSchema = z.object({
+  email: z.string().email("Email válido requerido"),
+  password: z.string().min(1, "Contraseña requerida"),
+});
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, "Contraseña actual requerida"),
+  newPassword: z.string().min(8, "La nueva contraseña debe tener al menos 8 caracteres"),
+});
+
 // Types
 export type UpsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
@@ -118,3 +137,6 @@ export type CreateJobRequest = z.infer<typeof createJobSchema>;
 export type InsertCreditsLedger = z.infer<typeof insertCreditsLedgerSchema>;
 export type CreditsLedger = typeof creditsLedger.$inferSelect;
 export type UpdateUserProfile = z.infer<typeof updateUserProfileSchema>;
+export type RegisterRequest = z.infer<typeof registerSchema>;
+export type LoginRequest = z.infer<typeof loginSchema>;
+export type ChangePasswordRequest = z.infer<typeof changePasswordSchema>;

@@ -1,15 +1,17 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated } from "./replitAuth";
+import { setupAuth, isAuthenticated, getUserId } from "./replitAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos, updateUserProfileSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
-import { sql, desc } from "drizzle-orm";
+import { sql, desc, eq } from "drizzle-orm";
 import { db } from "./db";
+import argon2 from "argon2";
+import expressRateLimit from "express-rate-limit";
 
 // In-memory polling controllers
 const pollingControllers = new Map<string, { controller: AbortController; attempts: number }>();
@@ -122,7 +124,7 @@ const rateLimit = new Map<string, { count: number; resetTime: number }>();
 
 function rateLimitMiddleware(maxRequests: number = 5, windowMs: number = 60000) {
   return (req: any, res: Response, next: Function) => {
-    const userId = req.user?.claims?.sub;
+    const userId = getUserId(req);
     if (!userId) return next();
 
     const now = Date.now();
@@ -148,20 +150,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Auth middleware
   await setupAuth(app);
 
-  // Auth routes
-  app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(404).json({ message: "User not found" });
-      }
-      res.json(user);
-    } catch (error) {
-      console.error("Error fetching user:", error);
-      res.status(500).json({ message: "Failed to fetch user" });
-    }
-  });
+  // Note: /api/auth/user is implemented later with hybrid auth support
 
   // Chat routes
   app.post('/api/chat', isAuthenticated, async (req: Request, res: Response) => {
@@ -225,7 +214,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Video generation routes
   app.post('/api/create-job', isAuthenticated, rateLimitMiddleware(5), async (req: any, res: Response) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = getUserId(req)!;
       let validatedData = createJobSchema.parse(req.body);
       
       // Server-side validation and override
@@ -809,6 +798,299 @@ export async function registerRoutes(app: Express): Promise<Server> {
       url: '/pricing',
       message: 'Próximamente: integración de pagos con Stripe' 
     });
+  });
+
+  // Rate limiter for login attempts
+  const loginRateLimit = expressRateLimit({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    max: 10, // max 10 attempts per 10 minutes per IP+email
+    message: { message: "Demasiados intentos de login. Inténtalo en 10 minutos." },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  // Local auth endpoints
+  app.post('/api/auth/register', async (req: Request, res: Response) => {
+    try {
+      const body = registerSchema.parse(req.body);
+      const { email, password, firstName, lastName } = body;
+      
+      // Sanitize email
+      const normalizedEmail = email.toLowerCase().trim();
+      
+      // Check if user already exists
+      const existingUser = await db.select().from(users).where(eq(users.email, normalizedEmail)).limit(1);
+      
+      if (existingUser.length > 0) {
+        const user = existingUser[0];
+        
+        // If user exists and already has password, reject
+        if (user.passwordHash) {
+          return res.status(409).json({ message: "El usuario ya existe con esa dirección de email" });
+        }
+        
+        // If user exists from Replit Auth but no password, add password
+        const hashedPassword = await argon2.hash(password);
+        await db.update(users)
+          .set({ 
+            passwordHash: hashedPassword,
+            firstName: firstName || user.firstName,
+            lastName: lastName || user.lastName,
+            updatedAt: new Date()
+          })
+          .where(eq(users.id, user.id));
+        
+        // Set session for existing user
+        (req as any).session.userId = user.id;
+        
+        return res.json({
+          ok: true,
+          message: "Contraseña añadida exitosamente",
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: firstName || user.firstName,
+            lastName: lastName || user.lastName,
+            credits: user.creditsRemaining,
+            profileImageUrl: user.profileImageUrl
+          }
+        });
+      }
+      
+      // Create new user
+      const hashedPassword = await argon2.hash(password);
+      const userId = randomUUID();
+      
+      await db.insert(users).values({
+        id: userId,
+        email: normalizedEmail,
+        firstName: firstName || null,
+        lastName: lastName || null,
+        passwordHash: hashedPassword,
+        creditsRemaining: 10, // Welcome credits
+        plan: 'free',
+        subscriptionStatus: 'inactive'
+      });
+      
+      // Set session
+      (req as any).session.userId = userId;
+      
+      console.log(JSON.stringify({
+        stage: "register",
+        userId,
+        email: normalizedEmail,
+        ip: req.ip
+      }));
+      
+      res.json({
+        ok: true,
+        message: "Usuario creado exitosamente",
+        user: {
+          id: userId,
+          email: normalizedEmail,
+          firstName,
+          lastName,
+          credits: 10,
+          profileImageUrl: null
+        }
+      });
+      
+    } catch (error) {
+      console.error("Register error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos de registro inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  app.post('/api/auth/login', loginRateLimit, async (req: Request, res: Response) => {
+    try {
+      const body = loginSchema.parse(req.body);
+      const { email, password } = body;
+      
+      // Sanitize email
+      const normalizedEmail = email.toLowerCase().trim();
+      
+      // Find user
+      const existingUser = await db.select().from(users).where(eq(users.email, normalizedEmail)).limit(1);
+      
+      if (existingUser.length === 0 || !existingUser[0].passwordHash) {
+        return res.status(401).json({ message: "Email o contraseña incorrectos" });
+      }
+      
+      const user = existingUser[0];
+      
+      // Verify password
+      const isValid = await argon2.verify(user.passwordHash!, password);
+      if (!isValid) {
+        return res.status(401).json({ message: "Email o contraseña incorrectos" });
+      }
+      
+      // Set session
+      (req as any).session.userId = user.id;
+      
+      console.log(JSON.stringify({
+        stage: "login",
+        userId: user.id,
+        email: normalizedEmail,
+        ip: req.ip
+      }));
+      
+      res.json({
+        ok: true,
+        message: "Login exitoso",
+        user: {
+          id: user.id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          credits: user.creditsRemaining,
+          profileImageUrl: user.profileImageUrl
+        }
+      });
+      
+    } catch (error) {
+      console.error("Login error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos de login inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  app.post('/api/auth/logout', async (req: Request, res: Response) => {
+    try {
+      (req as any).session.destroy((err: any) => {
+        if (err) {
+          console.error("Logout error:", err);
+          return res.status(500).json({ message: "Error al cerrar sesión" });
+        }
+        res.clearCookie('connect.sid');
+        res.json({ ok: true, message: 'Sesión cerrada exitosamente' });
+      });
+    } catch (error) {
+      console.error("Logout error:", error);
+      res.status(500).json({ message: "Error al cerrar sesión" });
+    }
+  });
+
+  app.get('/api/auth/user', async (req: Request, res: Response) => {
+    try {
+      const session = (req as any).session;
+      
+      // Check for local auth session first
+      if (session?.userId) {
+        const user = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+        if (user.length > 0) {
+          const userData = user[0];
+          return res.json({
+            id: userData.id,
+            email: userData.email,
+            firstName: userData.firstName,
+            lastName: userData.lastName,
+            credits: userData.creditsRemaining,
+            profileImageUrl: userData.profileImageUrl,
+            plan: userData.plan,
+            subscriptionStatus: userData.subscriptionStatus,
+            createdAt: userData.createdAt
+          });
+        }
+      }
+      
+      // Check for Replit auth session
+      const replitUser = (req as any).user;
+      if (replitUser?.claims?.sub) {
+        const userId = replitUser.claims.sub;
+        const user = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+        if (user.length > 0) {
+          const userData = user[0];
+          return res.json({
+            id: userData.id,
+            email: userData.email,
+            firstName: userData.firstName,
+            lastName: userData.lastName,
+            credits: userData.creditsRemaining,
+            profileImageUrl: userData.profileImageUrl,
+            plan: userData.plan,
+            subscriptionStatus: userData.subscriptionStatus,
+            createdAt: userData.createdAt
+          });
+        }
+      }
+      
+      res.status(401).json({ message: "No autenticado" });
+      
+    } catch (error) {
+      console.error("Get user error:", error);
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  app.post('/api/account/change-password', async (req: Request, res: Response) => {
+    try {
+      // Check authentication (local session only)
+      const session = (req as any).session;
+      if (!session?.userId) {
+        return res.status(401).json({ message: "No autenticado" });
+      }
+      
+      const body = changePasswordSchema.parse(req.body);
+      const { currentPassword, newPassword } = body;
+      
+      // Get user
+      const user = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
+      if (user.length === 0 || !user[0].passwordHash) {
+        return res.status(400).json({ message: "Usuario no encontrado o sin contraseña local" });
+      }
+      
+      const userData = user[0];
+      
+      // Verify current password
+      const isValid = await argon2.verify(userData.passwordHash!, currentPassword);
+      if (!isValid) {
+        return res.status(400).json({ message: "Contraseña actual incorrecta" });
+      }
+      
+      // Hash and update new password
+      const newHashedPassword = await argon2.hash(newPassword);
+      await db.update(users)
+        .set({ 
+          passwordHash: newHashedPassword,
+          updatedAt: new Date()
+        })
+        .where(eq(users.id, session.userId));
+      
+      console.log(JSON.stringify({
+        stage: "change_password",
+        userId: session.userId,
+        ip: req.ip
+      }));
+      
+      res.json({
+        ok: true,
+        message: "Contraseña actualizada exitosamente"
+      });
+      
+    } catch (error) {
+      console.error("Change password error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
   });
 
   const httpServer = createServer(app);

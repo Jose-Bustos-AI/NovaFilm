@@ -6,6 +6,8 @@ import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { isUnauthorizedError } from "@/lib/authUtils";
+import { useAuth } from "@/hooks/useAuth";
+import { AuthModal } from "@/components/auth-modal";
 
 interface Message {
   role: 'user' | 'assistant';
@@ -24,6 +26,8 @@ interface RefinedPrompt {
 }
 
 export default function ChatInterface() {
+  const { user } = useAuth();
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: 'assistant',
@@ -318,6 +322,17 @@ export default function ChatInterface() {
   const handleSend = () => {
     if (!input.trim() || chatMutation.isPending) return;
 
+    // Check if user is authenticated
+    if (!user) {
+      setShowAuthModal(true);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "Para generar videos necesitas iniciar sesión. ¡Te espero del otro lado! 🚀",
+        timestamp: new Date()
+      }]);
+      return;
+    }
+
     const userMessage = input.trim();
     setMessages(prev => [...prev, {
       role: 'user',
@@ -497,6 +512,16 @@ export default function ChatInterface() {
           </div>
         </div>
       </CardContent>
+      
+      <AuthModal 
+        open={showAuthModal} 
+        onOpenChange={setShowAuthModal}
+        onAuthSuccess={() => {
+          // Refresh user data after successful auth
+          queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
+          queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+        }}
+      />
     </Card>
   );
 }

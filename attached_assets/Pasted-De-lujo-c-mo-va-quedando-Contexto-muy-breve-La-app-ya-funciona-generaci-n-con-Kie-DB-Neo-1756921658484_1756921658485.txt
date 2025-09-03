@@ -1,0 +1,127 @@
+De lujo cómo va quedando! 👏
+
+✅ Contexto (muy breve)
+
+La app ya funciona: generación con Kie, DB Neon (Drizzle), jobs/videos/usuarios, créditos y “Mi Cuenta”.
+
+Hoy no queremos montar OAuth (Google/GitHub).
+
+Queremos un login rápido por email + contraseña como paso intermedio, sin romper nada (dashboard, créditos, galería, webhooks, etc.).
+
+🧱 REGLA DE ORO
+
+No rompas el login actual ni nada del flujo de generación. Añade login local (email/contraseña) como capa adicional y deja listo el switch para migrar a OAuth mañana. Si algo entra en conflicto, mantén el comportamiento anterior por defecto y habilita el nuevo con una flag.
+
+🔧 Instrucciones para Replit (implementación exacta)
+1) Feature: Login local mínimo (email + contraseña) con sesiones
+
+Objetivo: permitir registrarse, iniciar/cerrar sesión y usar la app con sesión de express-session (ya en uso con connect-pg-simple).
+
+Hash de contraseña: usa argon2 (preferido) o bcrypt. No guardes contraseñas en claro.
+
+Rate limiting: 10 intentos / 10 min por IP+email en /api/auth/login.
+
+Campos obligatorios de registro: email, password, (opcional first_name, last_name).
+
+Reglas password: min 8 chars; si falla, responde 400 con mensaje claro.
+
+Sesión: a la primera petición exitosa, guarda req.session.userId = <user.id>.
+
+2) Base de datos (Drizzle + Neon)
+
+Sin migraciones destructivas.
+
+Si users.password_hash no existe, añádelo (nullable) y deja todo lo anterior intacto.
+
+Índices: users.email UNIQUE (si no existe).
+
+No toques tablas de jobs, videos, sessions, credits_history.
+
+3) Nuevos endpoints (REST)
+
+Todos responden JSON y usan el mismo logger estructurado que añadiste:
+
+POST /api/auth/register
+Body: { email, password, firstName?, lastName? }
+Acciones:
+
+Si el email ya existe y tiene password_hash → 409.
+
+Si existe sin password_hash (venía de Replit OAuth), completa password_hash y sigue.
+
+Crea usuario si no existe (con 10 créditos por defecto solo si es nuevo).
+
+Inicia sesión: set req.session.userId.
+
+POST /api/auth/login
+Body: { email, password } → valida hash → set req.session.userId.
+
+POST /api/auth/logout
+Destruye sesión con manejo de errores (si falla, 500; si ok, 200).
+
+GET /api/auth/user
+Devuelve perfil sin password_hash. Campos: id, email, first_name, last_name, credits, created_at, plan, profile_image_url.
+
+PATCH /api/account
+Body opcional: { firstName?, lastName?, profileImageUrl? }
+Usa isAuthenticated y actualiza datos.
+
+POST /api/account/change-password
+Body: { currentPassword, newPassword }
+Verifica current → actualiza hash → 200.
+
+Importante: Mantén /api/create-job, /api/videos, /api/jobs y el consumo de créditos exactamente igual, solo que ahora se basan en la sesión local también.
+
+4) Frontend (UI mínima)
+
+Header/Sidebar: añade botón “Entrar / Registrarse” si no hay sesión; si hay sesión, muestra el nombre y el menú “Mi Cuenta / Cerrar sesión” (no rompas lo existente).
+
+Modal rápido (o página) con tabs Login / Registro:
+
+Registro: email + password (+ nombre opcional).
+
+Login: email + password.
+
+Mi Cuenta: ya existe; añade sección “Cambiar contraseña” con form {current, new}.
+
+UX: Si un usuario sin sesión intenta generar video, muestra modal login y bloquea acción hasta iniciar sesión.
+
+5) Compatibilidad y flags
+
+Crea env var AUTH_MODE con valores: replit, local, hybrid.
+
+hybrid (por defecto): si hay sesión Replit, úsala; si no, permite login local.
+
+local: fuerza login local.
+
+replit: mantiene el comportamiento actual (por si algo falla).
+
+No elimines nada del flujo de Replit Auth; solo añade.
+
+6) Seguridad mínima
+
+Sanitiza emails (lowercase, trim).
+
+CORS no cambiarlo (mantén como está).
+
+No exponer password_hash.
+
+Logs: nunca loguees contraseñas; usa logs estructurados con stage, userId, ip.
+
+7) Aceptación (checklist rápido)
+
+ Registro → sesión creada → dashboard muestra créditos.
+
+ Login → sesión creada → puede generar video (y descuenta 1 crédito).
+
+ Logout → sesión destruida → botón vuelve a “Entrar / Registrarse”.
+
+ /api/auth/user devuelve el usuario sin hash.
+
+ Cambiar contraseña funciona.
+
+ Rate limiting en login activo.
+
+ AUTH_MODE=hybrid permite ambos; replit no cambia nada; local solo local.
+
+ No se rompe la galería ni el webhook de Kie.
