@@ -50,25 +50,25 @@ export default function ChatInterface() {
     // Check if backend returned a JSON response object
     if (data.isJsonResponse && typeof data.response === 'object') {
       const jsonData = data.response;
-      if (jsonData.status === 'ready' && jsonData.final_prompt_en) {
+      if ((jsonData.status === 'ready' && jsonData.final_prompt_en) || jsonData.prompt_en) {
         return {
           message: "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
-          finalPrompt: jsonData.final_prompt_en
+          finalPrompt: jsonData.final_prompt_en || jsonData.prompt_en
         };
       }
     }
     
     // Fallback: try to parse from string response (legacy support)
     if (typeof data.response === 'string') {
-      const jsonMatch = data.response.match(/\{[^}]*"final_prompt_en"[^}]*\}/);
+      const jsonMatch = data.response.match(/\{[^}]*"(final_prompt_en|prompt_en)"[^}]*\}/);
       if (jsonMatch) {
         try {
           const jsonData = JSON.parse(jsonMatch[0]);
-          if (jsonData.final_prompt_en) {
+          if (jsonData.final_prompt_en || jsonData.prompt_en) {
             const messageWithoutJson = data.response.replace(jsonMatch[0], '').trim();
             return {
               message: messageWithoutJson || "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
-              finalPrompt: jsonData.final_prompt_en
+              finalPrompt: jsonData.final_prompt_en || jsonData.prompt_en
             };
           }
         } catch (e) {

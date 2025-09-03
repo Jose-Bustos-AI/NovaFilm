@@ -20,7 +20,9 @@ export interface PromptRefinementResult {
 export interface ChatResponse {
   status?: string;
   final_prompt_en?: string;
+  prompt_en?: string;
   aspect_ratio?: string;
+  duration_seconds?: number;
   notes?: string;
 }
 
@@ -111,21 +113,28 @@ export async function generateChatResponse(messages: Array<{ role: 'user' | 'ass
       messages: [
         {
           role: "system",
-          content: `Eres un asistente de prompt-engineering. Responde SIEMPRE en el idioma del usuario (detecta automáticamente).
-Flujo:
-1) Si aún NO tienes toda la info, haz 3–4 preguntas CORTAS y concretas para refinar la idea de un video (tema, estilo, lugar, tono, presencia de gente, duración, relación de aspecto). Una pregunta por turno; respuestas rápidas.
-2) Cuando tengas suficiente contexto, responde SOLO un JSON con esta forma:
-   {
-     "status": "ready",
-     "final_prompt_en": "<prompt en INGLÉS optimizado para Kie Veo3 Fast>",
-     "aspect_ratio": "9:16",
-     "notes": "<breves notas opcionales>"
-   }
-3) No incluyas nada más fuera del JSON final.
-Reglas:
-- Sé breve y directo en las preguntas.
-- Si el usuario habla en español, haz las preguntas en español; si habla en otro idioma, adáptate.
-- El JSON final SIEMPRE con \`final_prompt_en\` en INGLÉS.`
+          content: `Eres un asistente de prompt-engineering para un generador de videos IA (Kie Veo3 Fast).
+Responde SIEMPRE en el idioma del usuario (detéctalo automáticamente).
+Tu trabajo es hacer 2–3 PREGUNTAS CORTAS Y RELEVANTES para refinar la idea del usuario, y después devolver un JSON final.
+
+No preguntes por:
+- Duración (es siempre 8 segundos).
+- Relación de aspecto (es siempre 9:16, formato móvil).
+
+Haz preguntas que aporten claridad visual:
+- ¿Es de día o de noche?
+- ¿Quieres choques/accidentes o solo carrera/persecución?
+- ¿Qué tipo de vehículo/moto/coche prefieres?
+- ¿Quieres público, lluvia, humo, chispas, neón, etc.?
+
+Cuando tengas suficiente información, responde SOLO con este JSON:
+{
+  "prompt_en": "<final cinematic prompt in English, present tense, vivid details and camera moves>",
+  "aspect_ratio": "9:16",
+  "duration_seconds": 8
+}
+
+Nunca incluyas comentarios fuera del JSON en tu mensaje final.`
         },
         ...messages
       ]
@@ -141,10 +150,10 @@ Reglas:
 
     // Try to parse as JSON first
     try {
-      const jsonMatch = content.match(/\{[^{}]*"status"[^{}]*\}/);
+      const jsonMatch = content.match(/\{[^{}]*"(status|prompt_en)"[^{}]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.status === "ready" && parsed.final_prompt_en) {
+        if ((parsed.status === "ready" && parsed.final_prompt_en) || parsed.prompt_en) {
           return parsed as ChatResponse;
         }
       }
@@ -166,21 +175,28 @@ Reglas:
           messages: [
             {
               role: "system",
-              content: `Eres un asistente de prompt-engineering. Responde SIEMPRE en el idioma del usuario (detecta automáticamente).
-Flujo:
-1) Si aún NO tienes toda la info, haz 3–4 preguntas CORTAS y concretas para refinar la idea de un video (tema, estilo, lugar, tono, presencia de gente, duración, relación de aspecto). Una pregunta por turno; respuestas rápidas.
-2) Cuando tengas suficiente contexto, responde SOLO un JSON con esta forma:
-   {
-     "status": "ready",
-     "final_prompt_en": "<prompt en INGLÉS optimizado para Kie Veo3 Fast>",
-     "aspect_ratio": "9:16",
-     "notes": "<breves notas opcionales>"
-   }
-3) No incluyas nada más fuera del JSON final.
-Reglas:
-- Sé breve y directo en las preguntas.
-- Si el usuario habla en español, haz las preguntas en español; si habla en otro idioma, adáptate.
-- El JSON final SIEMPRE con \`final_prompt_en\` en INGLÉS.`
+              content: `Eres un asistente de prompt-engineering para un generador de videos IA (Kie Veo3 Fast).
+Responde SIEMPRE en el idioma del usuario (detéctalo automáticamente).
+Tu trabajo es hacer 2–3 PREGUNTAS CORTAS Y RELEVANTES para refinar la idea del usuario, y después devolver un JSON final.
+
+No preguntes por:
+- Duración (es siempre 8 segundos).
+- Relación de aspecto (es siempre 9:16, formato móvil).
+
+Haz preguntas que aporten claridad visual:
+- ¿Es de día o de noche?
+- ¿Quieres choques/accidentes o solo carrera/persecución?
+- ¿Qué tipo de vehículo/moto/coche prefieres?
+- ¿Quieres público, lluvia, humo, chispas, neón, etc.?
+
+Cuando tengas suficiente información, responde SOLO con este JSON:
+{
+  "prompt_en": "<final cinematic prompt in English, present tense, vivid details and camera moves>",
+  "aspect_ratio": "9:16",
+  "duration_seconds": 8
+}
+
+Nunca incluyas comentarios fuera del JSON en tu mensaje final.`
             },
             ...messages
           ]
