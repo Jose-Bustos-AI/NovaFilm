@@ -4,9 +4,11 @@ import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
 import { refinePrompt, generateChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
-import { createJobSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
+import { sql } from "drizzle-orm";
+import { db } from "./db";
 
 const rateLimit = new Map<string, { count: number; resetTime: number }>();
 
@@ -241,6 +243,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("[VEO-CALLBACK] Processing error:", error);
       res.status(200).json({ message: "Callback received but processing failed" });
+    }
+  });
+
+  // Health check route
+  app.get('/api/health/db', async (req: Request, res: Response) => {
+    try {
+      // Test database connection and get table info
+      const usersCount = await db.select({ count: sql`count(*)` }).from(users);
+      const jobsCount = await db.select({ count: sql`count(*)` }).from(jobs);
+      const videosCount = await db.select({ count: sql`count(*)` }).from(videos);
+      
+      res.json({
+        ok: true,
+        driver: 'neon-serverless',
+        connection: 'postgresql',
+        tables: {
+          users: parseInt(usersCount[0].count as string),
+          jobs: parseInt(jobsCount[0].count as string),
+          videos: parseInt(videosCount[0].count as string)
+        }
+      });
+    } catch (error) {
+      console.error('Database health check failed:', error);
+      res.status(500).json({
+        ok: false,
+        error: 'Database connection failed',
+        message: process.env.DATABASE_URL ? 'Database error' : 'DATABASE_URL not configured'
+      });
     }
   });
 

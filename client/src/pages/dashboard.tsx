@@ -39,8 +39,45 @@ export default function Dashboard() {
     refetchInterval: 15000, // Poll every 15 seconds
   });
 
+  // Database health check
+  const { data: dbHealth, isError: dbError } = useQuery({
+    queryKey: ["/api/health/db"],
+    enabled: isAuthenticated,
+    refetchInterval: 60000, // Check every minute
+    retry: 2,
+  });
+
   if (isLoading || !isAuthenticated) {
     return null;
+  }
+
+  // Database error state
+  if (dbError || (dbHealth && !(dbHealth as any).ok)) {
+    return (
+      <div className="min-h-screen bg-background">
+        <div className="flex h-screen">
+          <Sidebar />
+          <div className="flex-1 flex items-center justify-center">
+            <div className="max-w-md mx-auto text-center p-6">
+              <div className="mb-4 p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
+                <div className="flex items-center gap-2 text-destructive mb-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                  </svg>
+                  <span className="font-medium">Database not configured</span>
+                </div>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Add DATABASE_URL in Replit Secrets (Neon) to enable video generation.
+                </p>
+                <div className="text-xs text-muted-foreground bg-muted p-2 rounded font-mono">
+                  DATABASE_URL=postgres://user:pass@host/db?sslmode=require
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Calculate stats

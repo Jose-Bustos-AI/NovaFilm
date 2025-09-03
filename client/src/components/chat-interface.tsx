@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { isUnauthorizedError } from "@/lib/authUtils";
@@ -33,6 +33,12 @@ export default function ChatInterface() {
   const [isTyping, setIsTyping] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+
+  // Database health check
+  const { data: dbHealth } = useQuery({
+    queryKey: ["/api/health/db"],
+    refetchInterval: 60000,
+  });
 
   const chatMutation = useMutation({
     mutationFn: async (message: string) => {
@@ -130,8 +136,16 @@ export default function ChatInterface() {
         timestamp: new Date()
       }]);
       
-      // Auto-generate the video
-      generateMutation.mutate(refinedPrompt);
+      // Check database health before auto-generating
+      if (dbHealth && (dbHealth as any).ok) {
+        generateMutation.mutate(refinedPrompt);
+      } else {
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: '⚠️ Cannot generate video: Database not configured. Please contact administrator to set up DATABASE_URL.',
+          timestamp: new Date()
+        }]);
+      }
     },
     onError: (error) => {
       if (isUnauthorizedError(error)) {
@@ -269,8 +283,9 @@ export default function ChatInterface() {
             />
             <Button
               onClick={handleSend}
-              disabled={isLoading || !input.trim()}
+              disabled={isLoading || !input.trim() || (dbHealth && !(dbHealth as any).ok)}
               data-testid="button-send-message"
+              title={dbHealth && !(dbHealth as any).ok ? "Database not configured" : "Send message"}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />

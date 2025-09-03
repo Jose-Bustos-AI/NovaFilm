@@ -1,0 +1,92 @@
+Prompt para Replit — Conectar Neon + Drizzle + Migraciones + Storage real
+
+Felicitación
+Buen trabajo con auth, chat y Kie. El pipeline ya vive; ahora le damos persistencia real para que todo aterrice en galería.
+
+Contexto
+No hay DATABASE_URL, así que el backend debe estar usando memoria/placeholder. Resultado: el taskId que viene del callback no encuentra registro. Necesitamos: conectar Neon Postgres, preparar Drizzle ORM, correr migraciones y apuntar el storage a Postgres.
+
+Regla de oro
+No rompas rutas ni lógica existente. Solo añade la capa de persistencia con Drizzle+Neon y redirige el storage a DB. Si DATABASE_URL falta, muestra un mensaje claro en el dashboard y no intentes generar vídeos.
+
+Instrucciones
+
+Dependencias y config Drizzle+Neon
+
+Instala: drizzle-orm @neondatabase/serverless drizzle-kit zod (si faltan).
+
+Crea/actualiza drizzle.config.ts con driver neon-http y rutas a esquemas/migraciones.
+
+En server/lib/db.ts crea el cliente:
+
+Usa @neondatabase/serverless (HTTP) con process.env.DATABASE_URL.
+
+Exporta db de drizzle-orm/neon-http.
+
+Si no hay DATABASE_URL, lanza error claro: "DATABASE_URL missing. Set Neon URL in Replit Secrets.".
+
+Esquema y migraciones (Drizzle)
+
+Implementa tablas según este modelo (ajusta a Drizzle):
+
+users(id uuid pk, email text unique not null, password_hash text, created_at timestamptz default now())
+
+enum job_status = QUEUED | PROCESSING | READY | FAILED
+
+jobs(id uuid pk default gen_random_uuid(), user_id uuid references users(id), task_id text unique not null, status job_status default 'QUEUED', error_reason text, created_at timestamptz default now())
+
+videos(id uuid pk default gen_random_uuid(), user_id uuid references users(id), task_id text unique not null, prompt text, provider_video_url text, resolution text, fallback_flag boolean default false, created_at timestamptz default now())
+
+Genera migraciones y aplícalas:
+
+npx drizzle-kit generate
+
+npx drizzle-kit migrate
+
+Storage real
+
+En server/storage.ts, implementa los métodos usando db:
+
+createJob(userId, taskId, status?)
+
+createVideoPlaceholder(userId, taskId, prompt?)
+
+updateJobStatus(taskId, status, errorReason?)
+
+updateVideoByTaskId(taskId, {provider_video_url, resolution, fallback_flag})
+
+getVideosByUser(userId) y getJobsByUser(userId)
+
+findJobByTaskId(taskId) / findVideoByTaskId(taskId)
+
+Asegúrate de que /api/create-job inserta job+video antes de llamar a Kie (o justo después de recibir taskId) y que /api/veo-callback hace upsert por taskId (idempotente).
+
+Healthcheck y UX si falta DB
+
+Crea GET /api/health/db que devuelva { ok: true, driver: 'neon-http', version, tables: {users, jobs, videos} }.
+
+En el frontend, si el health devuelve error o DATABASE_URL ausente:
+
+Muestra banner: “⚠️ Database not configured. Add DATABASE_URL in Replit Secrets (Neon).”
+
+Desactiva botón “Generate” con tooltip.
+
+README y Secrets
+
+Añade .env.example con DATABASE_URL=postgres://<user>:<pass>@<host>/<db>?sslmode=require.
+
+Instrucciones para pegar la URL de Neon en Replit → Secrets como DATABASE_URL.
+
+Criterios de aceptación
+
+npx drizzle-kit migrate se ejecuta sin errores.
+
+GET /api/health/db responde ok: true y cuenta tablas > 0.
+
+Al crear un job: fila en jobs + videos con task_id exacto.
+
+Al recibir callback: jobs.status → READY y videos.provider_video_url se completa.
+
+La galería muestra el vídeo sin refrescos manuales.
+
+Si falta DATABASE_URL, la app no permite generar y muestra aviso claro.
