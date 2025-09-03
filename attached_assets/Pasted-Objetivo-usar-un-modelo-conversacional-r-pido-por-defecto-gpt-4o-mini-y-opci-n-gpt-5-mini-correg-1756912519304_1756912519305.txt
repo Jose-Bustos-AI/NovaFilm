@@ -1,0 +1,78 @@
+Objetivo: usar un modelo conversacional rápido (por defecto gpt-4o-mini y opción gpt-5-mini), corregir el error max_tokens→max_completion_tokens, mantener el asistente en español (o el idioma del usuario), hacer 3–4 preguntas cortas para refinar y luego emitir un JSON con final_prompt_en (inglés) para Kie.
+
+1) Variables de entorno
+
+Añade CHAT_MODEL= gpt-4o-mini (y acepta gpt-5-mini si quiero cambiarlo luego).
+
+No romper nada más.
+
+2) server/services/openai.ts
+
+Crea una función getChatModel() que lea process.env.CHAT_MODEL || 'gpt-4o-mini'.
+
+En todas las llamadas a OpenAI chat:
+
+Sustituye cualquier uso de max_tokens por max_completion_tokens (solo si el modelo lo soporta).
+
+Si el modelo no soporta parámetros (p.ej. temperature ≠ 1), omítelos. Usa únicamente los parámetros compatibles.
+
+Establece max_completion_tokens: 500 por defecto (o el mínimo viable si hay restricción).
+
+System prompt (en español, pero adaptativo):
+
+Eres un asistente de prompt-engineering. Responde SIEMPRE en el idioma del usuario (detecta automáticamente).
+Flujo:
+1) Si aún NO tienes toda la info, haz 3–4 preguntas CORTAS y concretas para refinar la idea de un video (tema, estilo, lugar, tono, presencia de gente, duración, relación de aspecto). Una pregunta por turno; respuestas rápidas.
+2) Cuando tengas suficiente contexto, responde SOLO un JSON con esta forma:
+   {
+     "status": "ready",
+     "final_prompt_en": "<prompt en INGLÉS optimizado para Kie Veo3 Fast>",
+     "aspect_ratio": "9:16",
+     "notes": "<breves notas opcionales>"
+   }
+3) No incluyas nada más fuera del JSON final.
+Reglas:
+- Sé breve y directo en las preguntas.
+- Si el usuario habla en español, haz las preguntas en español; si habla en otro idioma, adáptate.
+- El JSON final SIEMPRE con `final_prompt_en` en INGLÉS.
+
+
+En generateChatResponse (o equivalente), robustecer el parser:
+
+Detectar si la salida es JSON (con status: "ready"). Si lo es, devolverlo intacto al frontend para que éste cree el job automáticamente.
+
+Si NO es JSON, devolver el texto normal (las preguntas).
+
+3) server/routes.ts (ruta /api/chat)
+
+Usa getChatModel() para seleccionar el modelo.
+
+Quita max_tokens; usa max_completion_tokens: 500. Si el SDK/modelo vuelve a quejarse, llámalo sin ningún parámetro extra.
+
+Manejo de errores:
+
+Si el error es unsupported_parameter o unsupported_value, reintenta una vez sin parámetros opcionales.
+
+Responder al frontend con un mensaje en español: “Estoy teniendo problemas temporales con el servicio de chat. Intenta de nuevo en unos segundos.” y log detallado en servidor.
+
+4) client/src/components/chat-interface.tsx
+
+Mantén el estado refining y el historial.
+
+Si la respuesta detectada es JSON con status:"ready", dispara el flujo actual de refine→create-job automáticamente (ya lo hacemos: conservar).
+
+Mensajes de usuario/assistant en español por defecto (o en el idioma del usuario si front ya detecta/arrastra el locale).
+
+No cambies nada del pipeline con Kie ni de seeds; sólo UX y selección de modelo.
+
+5) Aceptación (QA)
+
+Escribir en español “Quiero un video de un coche de carreras por Madrid”.
+
+El asistente hace 3–4 preguntas cortas (modelo de coche, época, presencia de gente, hora del día, etc.).
+
+Tras responder, el assistant devuelve solo el JSON con final_prompt_en (inglés) y aspect_ratio: "9:16".
+
+El backend no lanza errores de max_tokens; si el modelo no acepta temperature, no se envía.
+
+Se crea el job en Kie como antes. El chat indica en español: “Perfecto, estamos generando tu video (Veo3 Fast, 9:16). Suele tardar 2–5 minutos.”

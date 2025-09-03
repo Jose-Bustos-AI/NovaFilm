@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
-import { refinePrompt, generateChatResponse } from "./services/openai";
+import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { createJobSchema, users, jobs, videos } from "@shared/schema";
 import { z } from "zod";
@@ -171,6 +171,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Message is required" });
       }
 
+      console.log(`[CHAT] Using model: ${getChatModel()}, user message: ${message.substring(0, 50)}...`);
+
       // Build full conversation for OpenAI
       const fullConversation = [
         ...(conversationHistory || []),
@@ -178,10 +180,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ];
 
       const response = await generateChatResponse(fullConversation);
-      res.json({ response });
+      
+      // Check if response is JSON (ChatResponse) or string
+      if (typeof response === 'object' && response.status === 'ready') {
+        console.log(`[CHAT] JSON detected, final prompt ready: ${response.final_prompt_en?.substring(0, 50)}...`);
+        res.json({ response: response, isJsonResponse: true });
+      } else {
+        res.json({ response: response });
+      }
     } catch (error) {
       console.error("Chat error:", error);
-      res.status(500).json({ message: "Failed to process chat message" });
+      
+      // Handle specific OpenAI errors
+      if ((error as any)?.code === 'unsupported_parameter') {
+        console.log('[CHAT-ERROR] Unsupported parameter detected, handled in service layer');
+        res.status(500).json({ message: "Estoy teniendo problemas temporales con el servicio de chat. Intenta de nuevo en unos segundos." });
+      } else {
+        res.status(500).json({ message: "Failed to process chat message" });
+      }
     }
   });
 

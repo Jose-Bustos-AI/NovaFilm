@@ -4,6 +4,11 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY_ENV_VAR || "default_key"
 });
 
+// Get chat model from environment or default to gpt-4o-mini
+function getChatModel(): string {
+  return process.env.CHAT_MODEL || 'gpt-4o-mini';
+}
+
 export interface PromptRefinementResult {
   prompt: string;
   model: string;
@@ -11,6 +16,16 @@ export interface PromptRefinementResult {
   seeds?: number;
   enableFallback: boolean;
 }
+
+export interface ChatResponse {
+  status?: string;
+  final_prompt_en?: string;
+  aspect_ratio?: string;
+  notes?: string;
+}
+
+// Export getChatModel for use in routes
+export { getChatModel };
 
 export async function refinePrompt(userInput: string): Promise<PromptRefinementResult> {
   try {
@@ -86,40 +101,96 @@ Required JSON format (nothing else):
   }
 }
 
-export async function generateChatResponse(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<string> {
+export async function generateChatResponse(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<string | ChatResponse> {
   try {
-    // the newest OpenAI model is "gpt-5" which was released August 7, 2025. do not change this unless explicitly requested by the user
-    const response = await openai.chat.completions.create({
-      model: "gpt-5",
+    const model = getChatModel();
+    
+    // Build request parameters based on model capabilities
+    const requestParams: any = {
+      model: model,
       messages: [
         {
           role: "system",
-          content: `Eres un asistente conversacional que habla SIEMPRE en español. Ayudas al usuario a crear un prompt óptimo para generar un video con IA (Kie.ai, modelo veo3_fast, 9:16).
-
+          content: `Eres un asistente de prompt-engineering. Responde SIEMPRE en el idioma del usuario (detecta automáticamente).
 Flujo:
-1) El usuario da una idea inicial.
-2) Haz EXACTAMENTE 3 o 4 preguntas cortas, una a la vez, para concretar (elige entre: tipo de sujeto/estilo visual/ambiente/hora/época/público/ritmo). Pregunta -> espera respuesta -> siguiente. Evita párrafos largos.
-3) Cuando tengas suficiente info, responde:
-   "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀."
-4) A CONTINUACIÓN (misma respuesta) genera SOLO un bloque JSON válido con ESTA forma:
+1) Si aún NO tienes toda la info, haz 3–4 preguntas CORTAS y concretas para refinar la idea de un video (tema, estilo, lugar, tono, presencia de gente, duración, relación de aspecto). Una pregunta por turno; respuestas rápidas.
+2) Cuando tengas suficiente contexto, responde SOLO un JSON con esta forma:
    {
-     "finalPromptEnglish": "<prompt_de_video_en_INGLÉS_bien_detallado_y_cinematográfico>"
+     "status": "ready",
+     "final_prompt_en": "<prompt en INGLÉS optimizado para Kie Veo3 Fast>",
+     "aspect_ratio": "9:16",
+     "notes": "<breves notas opcionales>"
    }
-
+3) No incluyas nada más fuera del JSON final.
 Reglas:
-- Todo el chat visible es en español.
-- El JSON debe estar en INGLÉS y ser válido (una sola línea si es posible).
-- No incluyas código ni explicaciones fuera del chat y del JSON final.
-- No uses markdown en el JSON.`
+- Sé breve y directo en las preguntas.
+- Si el usuario habla en español, haz las preguntas en español; si habla en otro idioma, adáptate.
+- El JSON final SIEMPRE con \`final_prompt_en\` en INGLÉS.`
         },
         ...messages
-      ],
-      max_tokens: 500,
-    });
+      ]
+    };
+    
+    // Add max_completion_tokens only for models that support it
+    if (model.includes('gpt-4') || model.includes('gpt-3.5')) {
+      requestParams.max_completion_tokens = 500;
+    }
 
-    return response.choices[0].message.content || "I apologize, but I couldn't generate a response. Please try again.";
+    const response = await openai.chat.completions.create(requestParams);
+    const content = response.choices[0].message.content || "";
+
+    // Try to parse as JSON first
+    try {
+      const jsonMatch = content.match(/\{[^{}]*"status"[^{}]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.status === "ready" && parsed.final_prompt_en) {
+          return parsed as ChatResponse;
+        }
+      }
+    } catch (parseError) {
+      // Not JSON, continue as normal text
+    }
+
+    return content || "Lo siento, no pude generar una respuesta. Inténtalo de nuevo.";
   } catch (error) {
     console.error("OpenAI chat error:", error);
-    return "I'm having trouble connecting to the AI service right now. Please try again in a moment.";
+    
+    // Handle unsupported parameter errors
+    if ((error as any)?.code === 'unsupported_parameter') {
+      console.log("Retrying without optional parameters...");
+      try {
+        const model = getChatModel();
+        const basicResponse = await openai.chat.completions.create({
+          model: model,
+          messages: [
+            {
+              role: "system",
+              content: `Eres un asistente de prompt-engineering. Responde SIEMPRE en el idioma del usuario (detecta automáticamente).
+Flujo:
+1) Si aún NO tienes toda la info, haz 3–4 preguntas CORTAS y concretas para refinar la idea de un video (tema, estilo, lugar, tono, presencia de gente, duración, relación de aspecto). Una pregunta por turno; respuestas rápidas.
+2) Cuando tengas suficiente contexto, responde SOLO un JSON con esta forma:
+   {
+     "status": "ready",
+     "final_prompt_en": "<prompt en INGLÉS optimizado para Kie Veo3 Fast>",
+     "aspect_ratio": "9:16",
+     "notes": "<breves notas opcionales>"
+   }
+3) No incluyas nada más fuera del JSON final.
+Reglas:
+- Sé breve y directo en las preguntas.
+- Si el usuario habla en español, haz las preguntas en español; si habla en otro idioma, adáptate.
+- El JSON final SIEMPRE con \`final_prompt_en\` en INGLÉS.`
+            },
+            ...messages
+          ]
+        });
+        return basicResponse.choices[0].message.content || "Lo siento, no pude generar una respuesta. Inténtalo de nuevo.";
+      } catch (retryError) {
+        console.error("Retry also failed:", retryError);
+      }
+    }
+    
+    return "Estoy teniendo problemas temporales con el servicio de chat. Intenta de nuevo en unos segundos.";
   }
 }

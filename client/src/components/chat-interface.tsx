@@ -46,24 +46,39 @@ export default function ChatInterface() {
   });
 
   // Function to parse JSON from assistant response
-  const parseAssistantResponse = (response: string): { message: string; finalPrompt?: string } => {
-    // Look for JSON block with finalPromptEnglish
-    const jsonMatch = response.match(/\{[^}]*"finalPromptEnglish"[^}]*\}/);
-    if (jsonMatch) {
-      try {
-        const jsonData = JSON.parse(jsonMatch[0]);
-        if (jsonData.finalPromptEnglish) {
-          const messageWithoutJson = response.replace(jsonMatch[0], '').trim();
-          return {
-            message: messageWithoutJson || "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
-            finalPrompt: jsonData.finalPromptEnglish
-          };
-        }
-      } catch (e) {
-        console.log('Failed to parse JSON from response:', e);
+  const parseAssistantResponse = (data: any): { message: string; finalPrompt?: string } => {
+    // Check if backend returned a JSON response object
+    if (data.isJsonResponse && typeof data.response === 'object') {
+      const jsonData = data.response;
+      if (jsonData.status === 'ready' && jsonData.final_prompt_en) {
+        return {
+          message: "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
+          finalPrompt: jsonData.final_prompt_en
+        };
       }
     }
-    return { message: response };
+    
+    // Fallback: try to parse from string response (legacy support)
+    if (typeof data.response === 'string') {
+      const jsonMatch = data.response.match(/\{[^}]*"final_prompt_en"[^}]*\}/);
+      if (jsonMatch) {
+        try {
+          const jsonData = JSON.parse(jsonMatch[0]);
+          if (jsonData.final_prompt_en) {
+            const messageWithoutJson = data.response.replace(jsonMatch[0], '').trim();
+            return {
+              message: messageWithoutJson || "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
+              finalPrompt: jsonData.final_prompt_en
+            };
+          }
+        } catch (e) {
+          console.log('Failed to parse JSON from response:', e);
+        }
+      }
+      return { message: data.response };
+    }
+    
+    return { message: typeof data.response === 'string' ? data.response : 'Error en la respuesta' };
   };
 
   const chatMutation = useMutation({
@@ -75,7 +90,7 @@ export default function ChatInterface() {
       return await response.json();
     },
     onSuccess: (data) => {
-      const parsed = parseAssistantResponse(data.response);
+      const parsed = parseAssistantResponse(data);
       
       setMessages(prev => [...prev, {
         role: 'assistant',
