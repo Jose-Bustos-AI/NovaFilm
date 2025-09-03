@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { setupAuth, isAuthenticated } from "./replitAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
+import { thumbnailService } from "./services/thumbnail";
 import { createJobSchema, users, jobs, videos } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
@@ -408,6 +409,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             resolution: info.resolution,
             fallbackFlag: fallbackFlag || false,
           });
+          
+          // Generate thumbnail for the video (async, don't block response)
+          thumbnailService.processVideoThumbnail(normalizedTaskId, info.resultUrls[0])
+            .catch(error => {
+              console.error(`[THUMBNAIL] Failed to process thumbnail for ${normalizedTaskId}:`, error);
+            });
+          
         } catch (videoError) {
           console.error(`[VEO-CALLBACK] Failed to update video for taskId: ${normalizedTaskId}`, videoError);
         }
@@ -505,6 +513,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('Debug jobs error:', error);
       res.status(500).json({ error: 'Failed to fetch debug data' });
+    }
+  });
+
+  // Thumbnail backfill endpoint (development only)
+  app.post('/api/thumbnails/backfill', async (req: Request, res: Response) => {
+    try {
+      // Only available in development
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(404).json({ message: 'Not found' });
+      }
+      
+      console.log('[THUMBNAIL] Starting backfill process...');
+      
+      // Run backfill asynchronously
+      thumbnailService.backfillThumbnails()
+        .catch(error => {
+          console.error('[THUMBNAIL] Backfill failed:', error);
+        });
+      
+      res.json({ message: 'Thumbnail backfill started' });
+    } catch (error) {
+      console.error('Error starting thumbnail backfill:', error);
+      res.status(500).json({ message: 'Failed to start backfill' });
     }
   });
 

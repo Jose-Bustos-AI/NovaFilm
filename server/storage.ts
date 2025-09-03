@@ -10,7 +10,7 @@ import {
   type InsertVideo,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, isNull } from "drizzle-orm";
 
 export interface IStorage {
   // User operations (mandatory for Replit Auth)
@@ -28,9 +28,11 @@ export interface IStorage {
   createVideo(video: InsertVideo): Promise<Video>;
   updateVideo(taskId: string, updates: Partial<InsertVideo>): Promise<void>;
   updateVideoTaskId(oldTaskId: string, newTaskId: string): Promise<void>;
+  updateVideoThumbnail(taskId: string, thumbnail: string): Promise<void>;
   getUserVideos(userId: string): Promise<Video[]>;
   getVideo(id: string): Promise<Video | undefined>;
   getVideoByTaskId(taskId: string): Promise<Video | undefined>;
+  getVideosWithoutThumbnails(): Promise<Video[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -124,6 +126,23 @@ export class DatabaseStorage implements IStorage {
   async getVideoByTaskId(taskId: string): Promise<Video | undefined> {
     const [video] = await db.select().from(videos).where(eq(videos.taskId, taskId));
     return video;
+  }
+
+  async updateVideoThumbnail(taskId: string, thumbnail: string): Promise<void> {
+    await db
+      .update(videos)
+      .set({ thumbnail })
+      .where(eq(videos.taskId, taskId));
+  }
+
+  async getVideosWithoutThumbnails(): Promise<Video[]> {
+    return await db
+      .select()
+      .from(videos)
+      .where(and(
+        isNull(videos.thumbnail)
+      ))
+      .orderBy(desc(videos.createdAt));
   }
 }
 

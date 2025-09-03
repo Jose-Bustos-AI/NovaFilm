@@ -53,6 +53,7 @@ export const videos = pgTable("videos", {
   prompt: text("prompt").notNull(),
   title: text("title"),
   thumbnail: text("thumbnail"),
+  thumbnailUrl: text("thumbnail_url"),
   providerVideoUrl: text("provider_video_url"),
   resolution: text("resolution"),
   fallbackFlag: boolean("fallback_flag").default(false),

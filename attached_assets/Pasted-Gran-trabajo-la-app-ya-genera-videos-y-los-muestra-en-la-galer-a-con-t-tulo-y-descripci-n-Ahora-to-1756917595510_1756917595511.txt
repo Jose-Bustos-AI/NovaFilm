@@ -1,0 +1,100 @@
+Gran trabajo: la app ya genera videos y los muestra en la galería con título y descripción. Ahora toca hacerla más atractiva visualmente añadiendo portadas a cada tarjeta.
+
+🧠 Contexto
+
+Actualmente las tarjetas de la galería muestran un icono genérico. Queremos que cada tarjeta muestre una imagen de portada tomada directamente del video (por ejemplo, el frame del segundo 1). Esa portada debe guardarse y persistir para no recalcularse en cada visita. Si por cualquier motivo no podemos extraerla, se mantiene el icono como fallback.
+
+🛑 Regla de oro (NO romper nada)
+
+No toques el flujo que ya funciona: creación de jobs, callback del proveedor, guardado en DB, polling, seeds, etc.
+
+Esto es un añadido: capturar un frame, guardarlo y mostrarlo.
+
+Si algo falla al generar la portada, no debe afectar a la creación ni visualización del video.
+
+✅ Instrucciones
+1) Datos / DB
+
+Añadir (si no existe) el campo thumbnail_url a la tabla videos.
+
+Tipo: text (nullable).
+
+No modificar columnas existentes ni relaciones.
+
+2) Backend: generar la portada al finalizar el video
+
+Lugar: en el callback del proveedor cuando el video pasa a READY y tenemos provider_video_url.
+
+Tarea:
+
+Extraer un frame del video en el segundo 1 (si el video dura < 1s, usar el frame del 0.1s).
+
+Guardar la imagen como .jpg o .png en el mismo storage/CDN donde alojamos los assets de la app.
+
+Estructura sugerida: thumbnails/{taskId}.jpg.
+
+Persistir la URL resultante en videos.thumbnail_url.
+
+Consideraciones:
+
+Si la portada ya existe (por reintentos), no la regeneres; usa la existente (idempotencia).
+
+Si falla la extracción o subida, registra el error en logs, no lances error al flujo principal.
+
+3) Backfill (opcional pero recomendado)
+
+Crear una tarea puntual para generar thumbnail_url para videos ya READY que aún no la tengan.
+
+Ejecutar solo bajo una bandera de entorno o endpoint de debug (solo dev).
+
+4) Frontend: mostrar la portada en la galería
+
+En las tarjetas de la galería y en “Recent Videos”:
+
+Si thumbnail_url existe → usarla como imagen cover (ratio 9:16 o el que corresponda, con object-fit: cover).
+
+Si no existe → mantener el icono actual como fallback.
+
+Lazy loading de imágenes para mejorar UX.
+
+Accesibilidad: alt basado en el título del video.
+
+Mantener todo el estilo actual (bordes, sombras, etiqueta “720p”, etc.).
+
+5) Detalle de video (cuando el usuario abre uno)
+
+Usar la misma thumbnail_url como poster del reproductor (carga más agradable).
+
+No mostrar taskId al usuario (seguir ocultándolo).
+
+Mantener el resto de metadatos actuales.
+
+6) Logs y trazabilidad
+
+Log estructurado cuando:
+
+Se intenta generar la portada (con taskId, userId).
+
+Se guarda la thumbnail_url.
+
+Hay errores (sin interrumpir el flujo del video).
+
+7) Fallbacks y resiliencia
+
+Si el proveedor sirve el video con poca latencia y no da tiempo a extraer frame al vuelo, hacer un retry corto (hasta 2 intentos con backoff pequeño).
+
+Si tras los reintentos no hay portada, mostrar icono y listo.
+
+8) Pruebas de aceptación
+
+Generar un video nuevo y verificar:
+
+videos.thumbnail_url se guarda.
+
+La galería muestra la imagen como portada.
+
+El detalle usa esa portada como poster.
+
+Verificar backfill en videos antiguos (si se activa).
+
+Simular error de extracción y comprobar que el video sigue visible y la UI usa el icono.
