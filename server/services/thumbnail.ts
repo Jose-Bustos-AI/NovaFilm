@@ -1,4 +1,8 @@
 import { storage } from '../storage';
+import { spawn } from 'child_process';
+import { createWriteStream, unlinkSync, readFile } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 // Simple placeholder service for thumbnail generation
 // In a production app, this would use FFmpeg or a similar tool
@@ -19,10 +23,15 @@ export class ThumbnailService {
         return existingVideo.thumbnail;
       }
       
-      // For server-side thumbnail generation, we would need FFmpeg or similar
-      // For now, we'll generate a placeholder data URL that represents the video
-      const placeholderThumbnail = this.generatePlaceholderThumbnail(taskId);
+      // Try to extract real frame from video first
+      const realThumbnail = await this.extractFrameFromVideo(videoUrl, taskId);
+      if (realThumbnail) {
+        console.log(`[THUMBNAIL] Generated real frame thumbnail for ${taskId}`);
+        return realThumbnail;
+      }
       
+      // Fallback to placeholder if frame extraction fails
+      const placeholderThumbnail = this.generatePlaceholderThumbnail(taskId);
       console.log(`[THUMBNAIL] Generated placeholder thumbnail for ${taskId}`);
       return placeholderThumbnail;
       
@@ -32,6 +41,100 @@ export class ThumbnailService {
     }
   }
   
+  /**
+   * Extract frame from video URL using ffmpeg
+   */
+  private async extractFrameFromVideo(videoUrl: string, taskId: string): Promise<string | null> {
+    try {
+      console.log(`[THUMBNAIL] Extracting frame from video URL: ${videoUrl}`);
+      
+      // Create temporary file paths
+      const tempId = Date.now().toString() + Math.random().toString(36).substring(7);
+      const tempVideoPath = join(tmpdir(), `video_${tempId}.mp4`);
+      const tempImagePath = join(tmpdir(), `thumb_${tempId}.jpg`);
+      
+      try {
+        // Download video to temp file first
+        console.log(`[THUMBNAIL] Downloading video for ${taskId}...`);
+        const response = await fetch(videoUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch video: ${response.status}`);
+        }
+        
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Write video to temp file
+        await new Promise<void>((resolve, reject) => {
+          const writeStream = createWriteStream(tempVideoPath);
+          writeStream.write(buffer);
+          writeStream.end();
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+        });
+        
+        console.log(`[THUMBNAIL] Extracting frame from ${taskId}...`);
+        
+        // Extract frame at 1 second using ffmpeg
+        const thumbnailBase64 = await new Promise<string>((resolve, reject) => {
+          const ffmpeg = spawn('ffmpeg', [
+            '-i', tempVideoPath,
+            '-ss', '1', // Extract frame at 1 second
+            '-vframes', '1', // Extract only 1 frame
+            '-f', 'image2',
+            '-vf', 'scale=320:180', // Resize to standard thumbnail size
+            '-q:v', '2', // High quality
+            '-y', // Overwrite output file
+            tempImagePath
+          ]);
+          
+          let stderr = '';
+          ffmpeg.stderr.on('data', (data) => {
+            stderr += data.toString();
+          });
+          
+          ffmpeg.on('close', (code) => {
+            if (code === 0) {
+              // Read the generated image and convert to base64
+              readFile(tempImagePath, (err, data) => {
+                if (err) {
+                  reject(err);
+                } else {
+                  const base64 = `data:image/jpeg;base64,${data.toString('base64')}`;
+                  resolve(base64);
+                }
+              });
+            } else {
+              reject(new Error(`FFmpeg process exited with code ${code}. stderr: ${stderr}`));
+            }
+          });
+          
+          ffmpeg.on('error', reject);
+        });
+        
+        console.log(`[THUMBNAIL] Successfully extracted frame from video ${taskId}`);
+        return thumbnailBase64;
+        
+      } finally {
+        // Clean up temp files
+        try {
+          unlinkSync(tempVideoPath);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+        try {
+          unlinkSync(tempImagePath);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+      
+    } catch (error) {
+      console.error(`[THUMBNAIL] Error extracting frame from video ${taskId}:`, error);
+      return null;
+    }
+  }
+
   /**
    * Generate a placeholder thumbnail using SVG data URL
    */
