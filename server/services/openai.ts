@@ -24,6 +24,9 @@ export interface ChatResponse {
   aspect_ratio?: string;
   duration_seconds?: number;
   notes?: string;
+  message?: string;
+  needs_clarification?: boolean;
+  choices?: string[];
 }
 
 // Export getChatModel for use in routes
@@ -103,110 +106,160 @@ Required JSON format (nothing else):
   }
 }
 
+// State management for conversation slots
+interface ConversationSlots {
+  tema?: string;
+  momento?: string; // día, atardecer, noche
+  clima?: string; // soleado, nublado, lluvia, tormenta
+  vehiculo?: string;
+  gente?: string; // sí, no
+  tono?: string; // cinemático, emocionante, documental
+}
+
+// In-memory conversation state (in production, use Redis or session storage)
+const conversationStates = new Map<string, ConversationSlots>();
+
+// Helper function to extract information from free text
+function extractSlotInfo(text: string): Partial<ConversationSlots> {
+  const slots: Partial<ConversationSlots> = {};
+  const lowerText = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  
+  // Momento del día
+  if (lowerText.includes('noche') || lowerText.includes('nocturno') || lowerText.includes('night')) {
+    slots.momento = 'noche';
+  } else if (lowerText.includes('atardecer') || lowerText.includes('sunset') || lowerText.includes('dusk')) {
+    slots.momento = 'atardecer';
+  } else if (lowerText.includes('dia') || lowerText.includes('day') || lowerText.includes('manana') || lowerText.includes('morning')) {
+    slots.momento = 'día';
+  }
+  
+  // Clima
+  if (lowerText.includes('tormenta') || lowerText.includes('storm')) {
+    slots.clima = 'tormenta';
+  } else if (lowerText.includes('lluvia') || lowerText.includes('llueve') || lowerText.includes('lloviendo') || lowerText.includes('rain')) {
+    slots.clima = 'lluvia';
+  } else if (lowerText.includes('nublado') || lowerText.includes('cloudy') || lowerText.includes('clouds')) {
+    slots.clima = 'nublado';
+  } else if (lowerText.includes('sol') || lowerText.includes('sunny') || lowerText.includes('clear')) {
+    slots.clima = 'soleado';
+  }
+  
+  // Vehículo
+  if (lowerText.includes('moto') || lowerText.includes('motorcycle') || lowerText.includes('bike')) {
+    slots.vehiculo = 'moto';
+  } else if (lowerText.includes('coche') || lowerText.includes('car') || lowerText.includes('auto')) {
+    slots.vehiculo = 'coche';
+  }
+  
+  // Gente
+  if (lowerText.includes('sola') || lowerText.includes('solo') || lowerText.includes('alone')) {
+    slots.gente = 'no';
+  } else if (lowerText.includes('gente') || lowerText.includes('people') || lowerText.includes('publico')) {
+    slots.gente = 'sí';
+  }
+  
+  return slots;
+}
+
+// Helper function to generate clarifying questions with choices
+function generateClarifyingQuestion(missingSlots: string[]): { question: string; choices: string[] } {
+  const questionsAndChoices: Record<string, { question: string; choices: string[] }> = {
+    momento: {
+      question: "¿Prefieres que sea de día, al atardecer o de noche?",
+      choices: ["Día", "Atardecer", "Noche"]
+    },
+    clima: {
+      question: "¿Cómo debe ser el clima?",
+      choices: ["Soleado", "Nublado", "Lluvia", "Tormenta"]
+    },
+    vehiculo: {
+      question: "¿Qué tipo de vehículo?",
+      choices: ["Moto", "Coche", "Ninguno"]
+    },
+    gente: {
+      question: "¿Debe aparecer gente en el video?",
+      choices: ["Sí, con gente", "No, solo/a"]
+    },
+    tono: {
+      question: "¿Qué estilo prefieres?",
+      choices: ["Cinemático", "Emocionante", "Documental"]
+    }
+  };
+  
+  const slot = missingSlots[0];
+  return questionsAndChoices[slot] || {
+    question: "¿Podrías ser más específico?",
+    choices: []
+  };
+}
+
 export async function generateChatResponse(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<string | ChatResponse> {
   try {
     const model = getChatModel();
     
-    // Build request parameters based on model capabilities
-    const requestParams: any = {
-      model: model,
-      messages: [
-        {
-          role: "system",
-          content: `Eres un asistente de prompt-engineering para un generador de videos IA (Kie Veo3 Fast).
-Responde SIEMPRE en el idioma del usuario (detéctalo automáticamente).
-Tu trabajo es hacer 2–3 PREGUNTAS CORTAS Y RELEVANTES para refinar la idea del usuario, y después devolver un JSON final.
-
-No preguntes por:
-- Duración (es siempre 8 segundos).
-- Relación de aspecto (es siempre 9:16, formato móvil).
-
-Haz preguntas que aporten claridad visual:
-- ¿Es de día o de noche?
-- ¿Quieres choques/accidentes o solo carrera/persecución?
-- ¿Qué tipo de vehículo/moto/coche prefieres?
-- ¿Quieres público, lluvia, humo, chispas, neón, etc.?
-
-Cuando tengas suficiente información, responde SOLO con este JSON:
-{
-  "prompt_en": "<final cinematic prompt in English, present tense, vivid details and camera moves>",
-  "aspect_ratio": "9:16",
-  "duration_seconds": 8
-}
-
-Nunca incluyas comentarios fuera del JSON en tu mensaje final.`
-        },
-        ...messages
-      ]
-    };
+    // Get user ID for conversation state (use a simple hash of conversation for demo)
+    const conversationId = messages.slice(-3).map(m => m.content).join('').slice(0, 20);
+    let slots = conversationStates.get(conversationId) || {};
     
-    // Add max_completion_tokens only for models that support it
-    if (model.includes('gpt-4') || model.includes('gpt-3.5')) {
-      requestParams.max_completion_tokens = 500;
+    // Extract info from latest user message
+    const lastUserMessage = messages.filter(m => m.role === 'user').pop();
+    if (lastUserMessage) {
+      const extractedInfo = extractSlotInfo(lastUserMessage.content);
+      slots = { ...slots, ...extractedInfo };
+      conversationStates.set(conversationId, slots);
+      
+      console.log(`[CHAT] Conversation ${conversationId}: extracted info:`, extractedInfo);
+      console.log(`[CHAT] Current slots:`, slots);
     }
-
-    const response = await openai.chat.completions.create(requestParams);
-    const content = response.choices[0].message.content || "";
-
-    // Try to parse as JSON first
-    try {
-      const jsonMatch = content.match(/\{[^{}]*"(status|prompt_en)"[^{}]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if ((parsed.status === "ready" && parsed.final_prompt_en) || parsed.prompt_en) {
-          return parsed as ChatResponse;
-        }
+    
+    // Check if we have enough information to generate final prompt
+    const requiredSlots: (keyof ConversationSlots)[] = ['momento', 'clima'];
+    const missingSlots = requiredSlots.filter(slot => !slots[slot]);
+    
+    if (missingSlots.length > 0) {
+      // Ask clarifying question with choices
+      const { question, choices } = generateClarifyingQuestion(missingSlots);
+      console.log(`[CHAT] Missing slots: ${missingSlots.join(', ')}, asking: ${question}`);
+      
+      if (choices.length > 0) {
+        return {
+          message: question,
+          needs_clarification: true,
+          choices: choices
+        } as ChatResponse;
+      } else {
+        return question;
       }
-    } catch (parseError) {
-      // Not JSON, continue as normal text
     }
-
-    return content || "Lo siento, no pude generar una respuesta. Inténtalo de nuevo.";
+    
+    // We have enough info - generate final prompt
+    const tema = slots.tema || lastUserMessage?.content || "video scene";
+    const finalPromptEn = `A cinematic ${slots.momento === 'noche' ? 'night' : slots.momento === 'atardecer' ? 'sunset' : 'day'} scene with ${slots.clima === 'tormenta' ? 'stormy weather and heavy rain' : slots.clima === 'lluvia' ? 'rain' : slots.clima === 'nublado' ? 'cloudy skies' : 'clear sunny weather'}. ${tema}. Professional cinematography with dynamic camera movements, vivid details, and atmospheric lighting. 8 seconds duration, 9:16 aspect ratio.`;
+    
+    // Clear conversation state after generating final prompt
+    conversationStates.delete(conversationId);
+    
+    console.log(`[CHAT] Final prompt generated:`, finalPromptEn);
+    
+    return {
+      prompt_en: finalPromptEn,
+      aspect_ratio: "9:16",
+      duration_seconds: 8
+    } as ChatResponse;
+    
   } catch (error) {
-    console.error("OpenAI chat error:", error);
+    console.error("[CHAT] Error:", error);
     
-    // Handle unsupported parameter errors
-    if ((error as any)?.code === 'unsupported_parameter') {
-      console.log("Retrying without optional parameters...");
-      try {
-        const model = getChatModel();
-        const basicResponse = await openai.chat.completions.create({
-          model: model,
-          messages: [
-            {
-              role: "system",
-              content: `Eres un asistente de prompt-engineering para un generador de videos IA (Kie Veo3 Fast).
-Responde SIEMPRE en el idioma del usuario (detéctalo automáticamente).
-Tu trabajo es hacer 2–3 PREGUNTAS CORTAS Y RELEVANTES para refinar la idea del usuario, y después devolver un JSON final.
-
-No preguntes por:
-- Duración (es siempre 8 segundos).
-- Relación de aspecto (es siempre 9:16, formato móvil).
-
-Haz preguntas que aporten claridad visual:
-- ¿Es de día o de noche?
-- ¿Quieres choques/accidentes o solo carrera/persecución?
-- ¿Qué tipo de vehículo/moto/coche prefieres?
-- ¿Quieres público, lluvia, humo, chispas, neón, etc.?
-
-Cuando tengas suficiente información, responde SOLO con este JSON:
-{
-  "prompt_en": "<final cinematic prompt in English, present tense, vivid details and camera moves>",
-  "aspect_ratio": "9:16",
-  "duration_seconds": 8
-}
-
-Nunca incluyas comentarios fuera del JSON en tu mensaje final.`
-            },
-            ...messages
-          ]
-        });
-        return basicResponse.choices[0].message.content || "Lo siento, no pude generar una respuesta. Inténtalo de nuevo.";
-      } catch (retryError) {
-        console.error("Retry also failed:", retryError);
-      }
-    }
+    // Graceful fallback - never show "Error en la respuesta"
+    const fallbackMessages = [
+      "No me quedó claro, ¿puedes decirlo en una frase más corta?",
+      "¿Podrías darme más detalles sobre la escena que quieres crear?",
+      "Cuéntame qué tipo de video tienes en mente."
+    ];
     
-    return "Estoy teniendo problemas temporales con el servicio de chat. Intenta de nuevo en unos segundos.";
+    const randomFallback = fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
+    console.log(`[CHAT] Using fallback message: ${randomFallback}`);
+    
+    return randomFallback;
   }
 }

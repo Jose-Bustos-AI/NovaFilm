@@ -191,13 +191,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Chat error:", error);
       
-      // Handle specific OpenAI errors
-      if ((error as any)?.code === 'unsupported_parameter') {
-        console.log('[CHAT-ERROR] Unsupported parameter detected, handled in service layer');
-        res.status(500).json({ message: "Estoy teniendo problemas temporales con el servicio de chat. Intenta de nuevo en unos segundos." });
-      } else {
-        res.status(500).json({ message: "Failed to process chat message" });
-      }
+      // Never show generic errors to user - always provide helpful Spanish messages
+      const gracefulMessages = [
+        "No me quedó claro, ¿puedes decirlo en una frase más corta?",
+        "¿Podrías darme más detalles sobre la escena que quieres crear?",
+        "Cuéntame un poco más sobre tu idea para el video."
+      ];
+      
+      const fallbackMessage = gracefulMessages[Math.floor(Math.random() * gracefulMessages.length)];
+      
+      console.log(`[CHAT-ERROR] Using graceful fallback: ${fallbackMessage}`);
+      res.json({ response: fallbackMessage });
     }
   });
 

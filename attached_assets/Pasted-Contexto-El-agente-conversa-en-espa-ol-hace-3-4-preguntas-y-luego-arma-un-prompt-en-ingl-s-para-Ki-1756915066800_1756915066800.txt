@@ -1,0 +1,102 @@
+Contexto
+
+El agente conversa en español, hace 3–4 preguntas y luego arma un prompt en inglés para Kie.
+
+A veces, tras una respuesta libre del usuario (“sí, hojas caídas, tormenta y viento…”), el chat muestra “Error en la respuesta”.
+
+Esto casi seguro es por fallos de parseo/validación del mensaje del modelo (JSON parcial, campos faltantes, formato inesperado, tildes/typos, etc.) o por estados de conversación que no toleran entradas libres.
+
+🛑 Regla de oro (no romper lo que ya funciona)
+
+No tocar nada del flujo de generación, jobs, callbacks, seeds, DB ni del modelo ya configurado.
+Solo endurecer el agente y su parser para que:
+
+Nunca muestre “Error en la respuesta” al usuario.
+
+Siempre degrade con gracia: repite o reformula la pregunta, o usa valores por defecto.
+
+Siga preguntando y cierre el prompt final sin bloquearse.
+
+✅ Instrucciones (pasos claros)
+
+Manejar errores con gracia en /api/chat
+
+En el backend del chat, captura cualquier excepción de la llamada al modelo o del parser y no devuelvas “Error en la respuesta”.
+
+En su lugar, responde al usuario (en español):
+
+“No me quedó claro, ¿puedes decirlo en una frase más corta?”
+
+Ofrece opciones rápidas (botones/chips) cuando aplique.
+
+Parser tolerante a JSON y texto libre
+
+Antes de parsear JSON, intenta extraer bloque JSON con heurística (buscar el primer { y el último } y validar).
+
+Si no hay JSON válido, interpreta texto libre y asigna rasgos detectados (día/noche, clima, tipo de vehículo, presencia de gente, etc.).
+
+Acepta sinónimos y typos comunes en español (sí/si, noche/nocturno, lluvia/lloviendo, viento/ventoso, hojas/hojas caídas…).
+
+Campos faltantes ⇒ valores por defecto:
+
+duración = 8s (no preguntar)
+
+relación de aspecto = 9:16 (no preguntar)
+
+idioma del prompt final = inglés (siempre)
+
+Normaliza respuestas a categorías cerradas (ej.: clima:{soleado, nublado, lluvia, tormenta}, momento:{día, atardecer, noche}, gente:{sí, no}, tipo_moto:{competición, cross, custom/harley}, tono:{cinemático, emocionante, documental}).
+
+Estado conversacional robusto
+
+Mantén un pequeño state machine por sesión (en memoria o sesión) con los slots:
+
+tema/escena, momento del día, clima, tipo de vehículo/estilo, presencia de gente, tono.
+
+Cada turno:
+
+Si un slot está vacío, pregunta solo ese slot con 2–4 opciones breves y permite respuesta libre.
+
+Si una respuesta es ambigua/no parseable, repregunta con opciones y ejemplo (“Por ejemplo: día / atardecer / noche”).
+
+Cuando estén cubiertos los slots, arma el prompt final en inglés y dispara la creación del vídeo (sin bloquear la UI).
+
+Mensajes al usuario siempre en español y claros
+
+Sustituye el mensaje genérico por:
+
+“Creo que me faltó un detalle. ¿Te refieres a día, atardecer o noche?”
+
+“¿El clima debería ser seco, lluvia o tormenta?”
+
+Tras reunir todo:
+
+“Perfecto, ya tengo todo. Estoy preparando tu vídeo. Suele tardar 2–5 minutos. Te aviso en cuanto esté listo.”
+
+Logs y diagnóstico (solo servidor)
+
+Añade logs estructurados en /api/chat: stage, userId, turn, slots_filled, raw_model_reply, parse_ok.
+
+Cuando haya recuperación (fallback), loguea fallback_used:true y qué estrategia se aplicó (regex, defaults, repregunta).
+
+No tocar lo que funciona
+
+Mantén: creación de jobs, validaciones actuales, seeds por defecto, modelo conversacional ya elegido, y los textos de ETA en español.
+
+El prompt final en inglés debe conservar calidad cinematográfica y estructura que ya teníamos.
+
+UX de repregunta (frontend)
+
+Si el backend devuelve needs_clarification:true y choices:["día","atardecer","noche"], muestra chips clicables además de permitir texto.
+
+Reemplaza el texto “Error en la respuesta” por el mensaje de repregunta del backend.
+
+Pruebas rápidas
+
+Caso 1 (texto libre): “sí hojas caídas hay tormenta y viento y llueve mucho” ⇒ Debe mapear a clima: tormenta/lluvia, elementos: hojas, viento: sí, y pasar.
+
+Caso 2 (typos): “llueve muchho, de noche” ⇒ debe tolerar y normalizar a lluvia, noche.
+
+Caso 3 (respuesta vacía) ⇒ repregunta con opciones.
+
+Caso 4 (modelo responde sin JSON) ⇒ extracción por texto y seguir.

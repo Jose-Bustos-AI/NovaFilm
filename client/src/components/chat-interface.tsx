@@ -36,6 +36,7 @@ export default function ChatInterface() {
   const [chatMode, setChatMode] = useState<ChatMode>('idle');
   const [conversationHistory, setConversationHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [refinementTimeout, setRefinementTimeout] = useState<NodeJS.Timeout | null>(null);
+  const [quickChoices, setQuickChoices] = useState<string[]>([]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -46,7 +47,7 @@ export default function ChatInterface() {
   });
 
   // Function to parse JSON from assistant response
-  const parseAssistantResponse = (data: any): { message: string; finalPrompt?: string } => {
+  const parseAssistantResponse = (data: any): { message: string; finalPrompt?: string; choices?: string[] } => {
     // Check if backend returned a JSON response object
     if (data.isJsonResponse && typeof data.response === 'object') {
       const jsonData = data.response;
@@ -54,6 +55,14 @@ export default function ChatInterface() {
         return {
           message: "Perfecto, ya tengo todo. Estoy preparando tu vídeo. Dame unos minutillos 🚀.",
           finalPrompt: jsonData.final_prompt_en || jsonData.prompt_en
+        };
+      }
+      
+      // Check for clarification request with choices
+      if (jsonData.needs_clarification && jsonData.choices) {
+        return {
+          message: jsonData.message || "Selecciona una opción:",
+          choices: jsonData.choices
         };
       }
     }
@@ -78,7 +87,17 @@ export default function ChatInterface() {
       return { message: data.response };
     }
     
-    return { message: typeof data.response === 'string' ? data.response : 'Error en la respuesta' };
+    // Never show generic errors - provide helpful fallback
+    const fallbackMessages = [
+      "¿Podrías decírmelo de otra manera?",
+      "Cuéntame más detalles sobre tu idea.",
+      "No me quedó claro, ¿puedes ser más específico?"
+    ];
+    
+    const fallback = fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)];
+    console.log('Using frontend fallback message:', fallback);
+    
+    return { message: typeof data.response === 'string' ? data.response : fallback };
   };
 
   const chatMutation = useMutation({
@@ -103,6 +122,13 @@ export default function ChatInterface() {
         ...prev,
         { role: 'assistant', content: parsed.message }
       ]);
+      
+      // Set quick choices if provided
+      if (parsed.choices) {
+        setQuickChoices(parsed.choices);
+      } else {
+        setQuickChoices([]);
+      }
       
       // If we found a final prompt, trigger generation
       if (parsed.finalPrompt) {
@@ -140,8 +166,8 @@ export default function ChatInterface() {
       }
       
       toast({
-        title: "Error",
-        description: "Failed to send message. Please try again.",
+        title: "Problema de conexión",
+        description: "No pude enviar el mensaje. Inténtalo de nuevo por favor.",
         variant: "destructive",
       });
       setIsTyping(false);
@@ -287,6 +313,7 @@ export default function ChatInterface() {
     ]);
     
     setInput("");
+    setQuickChoices([]); // Clear choices when user sends a message
     setIsTyping(true);
 
     // Clear any existing refinement timeout
@@ -302,6 +329,35 @@ export default function ChatInterface() {
 
     // Always use the chat mutation for the conversational flow
     chatMutation.mutate(userMessage);
+  };
+
+  const handleQuickChoice = (choice: string) => {
+    setInput(choice);
+    // Auto-send the choice
+    setTimeout(() => {
+      const userMessage = choice;
+      setMessages(prev => [...prev, {
+        role: 'user',
+        content: userMessage,
+        timestamp: new Date()
+      }]);
+      
+      // Update conversation history
+      setConversationHistory(prev => [
+        ...prev,
+        { role: 'user', content: userMessage }
+      ]);
+      
+      setInput("");
+      setQuickChoices([]); // Clear choices
+      setIsTyping(true);
+
+      if (chatMode === 'idle') {
+        setChatMode('refining');
+      }
+
+      chatMutation.mutate(userMessage);
+    }, 100);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -379,8 +435,26 @@ export default function ChatInterface() {
           )}
         </div>
         
+        {/* Quick choices */}
+        {quickChoices.length > 0 && (
+          <div className="border-t border-border p-4 pb-2">
+            <div className="flex flex-wrap gap-2">
+              {quickChoices.map((choice, index) => (
+                <button
+                  key={index}
+                  onClick={() => handleQuickChoice(choice)}
+                  className="px-3 py-2 bg-primary/10 hover:bg-primary/20 text-primary rounded-full text-sm border border-primary/20 transition-colors"
+                  data-testid={`chip-choice-${index}`}
+                >
+                  {choice}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        
         {/* Input */}
-        <div className="border-t border-border p-4">
+        <div className={`border-t border-border p-4 ${quickChoices.length > 0 ? 'pt-2' : ''}`}>
           <div className="flex gap-3">
             <Input
               value={input}
