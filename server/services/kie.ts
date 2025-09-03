@@ -51,10 +51,18 @@ export class KieAiService {
     });
 
     if (!response.ok) {
-      throw new Error(`Kie.ai API error: ${response.status} ${response.statusText}`);
+      const errorText = await response.text();
+      throw new Error(`Kie.ai API error: ${response.status} ${response.statusText} - ${errorText}`);
     }
 
-    return await response.json();
+    const jsonResponse = await response.json();
+    
+    // Validate the response structure
+    if (!jsonResponse || typeof jsonResponse !== 'object') {
+      throw new Error('Invalid JSON response from Kie.ai API');
+    }
+    
+    return jsonResponse;
   }
 
   async getRecordInfo(taskId: string): Promise<any> {

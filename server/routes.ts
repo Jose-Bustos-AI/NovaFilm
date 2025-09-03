@@ -155,6 +155,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           enableFallback: false,
         });
 
+        // Check if response data is valid
+        if (!kieResponse.data || !kieResponse.data.taskId) {
+          throw new Error('Invalid response from Kie.ai API: missing taskId in response data');
+        }
+
         console.log(`[KIE-API-SUCCESS] Received taskId: ${kieResponse.data.taskId}, runId: ${kieResponse.data.runId}`);
         
         // Update job and video with the exact taskId from Kie.ai response
