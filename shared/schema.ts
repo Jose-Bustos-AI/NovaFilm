@@ -71,7 +71,7 @@ export const insertVideoSchema = createInsertSchema(videos).omit({
 export const createJobSchema = z.object({
   prompt: z.string().min(1, "Prompt is required"),
   aspectRatio: z.string().default("9:16"),
-  seeds: z.number().min(10000).max(999999).nullable().optional(),
+  seeds: z.number().min(10000).max(99999).nullable().optional(),
 });
 
 // Types
