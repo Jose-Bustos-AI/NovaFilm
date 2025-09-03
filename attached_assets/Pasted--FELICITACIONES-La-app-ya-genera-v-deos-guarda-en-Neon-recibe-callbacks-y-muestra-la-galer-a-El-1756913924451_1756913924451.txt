@@ -1,0 +1,67 @@
+🎉 FELICITACIONES
+La app ya genera vídeos, guarda en Neon, recibe callbacks y muestra la galería. El flujo de creación, seeds, polling y chat refinador funciona. ¡Gran trabajo!
+
+🧠 CONTEXTO
+Ahora queremos mejorar la Galería y la ficha de vídeo sin tocar nada del pipeline de generación:
+
+En la galería las tarjetas salen sin portada.
+
+En el detalle del vídeo se muestra información poco útil (incluye taskId) y falta un título legible y el prompt usado.
+
+El usuario puede hablar en español/inglés; el vídeo es de 8 s y 9:16 por defecto.
+
+🚨 REGLA DE ORO (NO ROMPER NADA)
+
+No tocar: creación de tareas, OpenAI/Kie, seeds, validaciones, callbacks, polling, autenticación ni modelo del chat.
+
+Cambios no destructivos: cualquier ajuste de base de datos debe ser aditivo/nullable.
+
+Siempre con fallbacks: si no hay miniatura, dejar el icono actual; si algo falla, la UI debe seguir igual.
+
+Mantener rendimiento y estilo actuales; nada de regresiones visuales ni de UX.
+
+🛠️ INSTRUCCIONES (QUÉ CAMBIAR)
+
+Miniatura (portada) para cada vídeo
+
+Añade soporte para almacenar una miniatura del primer fotograma del vídeo (campo opcional en la tabla de videos).
+
+Cuando un vídeo pasa a READY y tiene provider_video_url, en el cliente captura un único frame del inicio y guárdalo en el backend.
+
+Mostrar esa miniatura:
+
+En las tarjetas de la galería (sustituye el icono actual si hay miniatura).
+
+Como poster en el reproductor del detalle.
+
+Fallback: si no se puede generar/guardar, no mostrar errores al usuario y mantener el icono actual.
+
+Ficha de vídeo centrada en el usuario
+
+Ocultar taskId al usuario final (déjalo disponible solo para logs/DEV).
+
+Mostrar:
+
+Título en el idioma del usuario (si hay title úsalo; si no, deriva un título corto a partir del prompt; en español usar “Vídeo …”).
+
+Prompt utilizado (texto completo) bajo un encabezado claro.
+
+Metadatos: resolución (720p/1080p si existe), fecha de creación y duración (8 s).
+
+Mantener los botones Download y Share tal cual.
+
+Persistencia y límites
+
+La miniatura debe guardarse de forma persistente en Neon (campo opcional/nullable).
+
+Establece un límite de tamaño razonable para la miniatura (evitar cargas pesadas).
+
+Validar que solo el propietario del vídeo puede guardar su miniatura.
+
+Experiencia y accesibilidad
+
+Las tarjetas deben verse bien con y sin miniatura (no saltos de layout).
+
+Usa textos alternativos (alt) apropiados en las imágenes.
+
+No introducir latencias perceptibles en la navegación de la galería.

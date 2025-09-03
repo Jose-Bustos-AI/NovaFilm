@@ -592,6 +592,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Update video metadata (thumbnail and title)
+  app.patch('/api/videos/:id', isAuthenticated, async (req: any, res: Response) => {
+    try {
+      const { id } = req.params;
+      const userId = req.user.claims.sub;
+      const { thumbnail, title } = req.body;
+      
+      const video = await storage.getVideo(id);
+      if (!video) {
+        return res.status(404).json({ message: "Video not found" });
+      }
+      
+      if (video.userId !== userId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+      
+      // Validate thumbnail size (max 50KB)
+      if (thumbnail && thumbnail.length > 50000) {
+        return res.status(400).json({ message: "Thumbnail too large (max 50KB)" });
+      }
+      
+      // Update video metadata using taskId
+      const updates: any = {};
+      if (thumbnail !== undefined) updates.thumbnail = thumbnail;
+      if (title !== undefined) updates.title = title;
+      
+      if (Object.keys(updates).length > 0) {
+        await storage.updateVideo(video.taskId, updates);
+      }
+      
+      // Return updated video
+      const updatedVideo = await storage.getVideo(id);
+      res.json(updatedVideo);
+    } catch (error) {
+      console.error("Update video error:", error);
+      res.status(500).json({ message: "Failed to update video" });
+    }
+  });
+
   // Job status route
   app.get('/api/jobs', isAuthenticated, async (req: any, res: Response) => {
     try {

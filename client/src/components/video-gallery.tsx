@@ -1,12 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import VideoPlayer from "@/components/video-player";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/queryClient";
 
 interface Video {
   id: string;
   taskId: string;
   prompt: string;
+  title?: string;
+  thumbnail?: string;
   providerVideoUrl?: string;
   resolution?: string;
   createdAt: string;
@@ -20,6 +24,81 @@ interface VideoGalleryProps {
 
 export default function VideoGallery({ videos, isLoading, showAllVideos = false }: VideoGalleryProps) {
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
+  const queryClient = useQueryClient();
+  
+  // Mutation to update video metadata
+  const updateVideoMutation = useMutation({
+    mutationFn: async ({ videoId, updates }: { videoId: string; updates: any }) => {
+      const response = await apiRequest('PATCH', `/api/videos/${videoId}`, updates);
+      return await response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/videos'] });
+    }
+  });
+  
+  // Function to capture thumbnail from video
+  const captureThumbnail = async (videoUrl: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      video.crossOrigin = 'anonymous';
+      video.currentTime = 1; // Capture at 1 second
+      
+      video.onloadedmetadata = () => {
+        canvas.width = Math.min(video.videoWidth, 320);
+        canvas.height = Math.min(video.videoHeight, 180);
+        
+        video.onseeked = () => {
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            resolve(dataUrl);
+          } else {
+            resolve(null);
+          }
+        };
+      };
+      
+      video.onerror = () => resolve(null);
+      video.src = videoUrl;
+    });
+  };
+  
+  // Auto-generate thumbnails for videos without them
+  useEffect(() => {
+    const generateMissingThumbnails = async () => {
+      for (const video of videos) {
+        if (video.providerVideoUrl && !video.thumbnail && !updateVideoMutation.isPending) {
+          try {
+            const thumbnail = await captureThumbnail(video.providerVideoUrl);
+            if (thumbnail) {
+              const title = video.title || generateVideoTitle(video.prompt);
+              updateVideoMutation.mutate({
+                videoId: video.id,
+                updates: { thumbnail, title }
+              });
+            }
+          } catch (error) {
+            console.log('Failed to generate thumbnail for video:', video.id);
+          }
+        }
+      }
+    };
+    
+    generateMissingThumbnails();
+  }, [videos]);
+  
+  // Generate a user-friendly title from prompt
+  const generateVideoTitle = (prompt: string): string => {
+    const maxLength = 50;
+    if (prompt.length <= maxLength) {
+      return `Vídeo: ${prompt}`;
+    }
+    return `Vídeo: ${prompt.substring(0, maxLength)}...`;
+  };
   
   const formatTimeAgo = (dateString: string) => {
     const date = new Date(dateString);
@@ -105,8 +184,19 @@ export default function VideoGallery({ videos, isLoading, showAllVideos = false 
                   data-testid={`card-video-${video.id}`}
                 >
                   <div className="relative">
-                    {/* Placeholder thumbnail - in production you might want video thumbnails */}
-                    <div className="w-full h-48 bg-gradient-to-br from-primary/20 to-emerald-400/20 flex items-center justify-center">
+                    {video.thumbnail ? (
+                      <img 
+                        src={video.thumbnail} 
+                        alt={video.title || `Video ${video.taskId.slice(-8)}`}
+                        className="w-full h-48 object-cover"
+                        onError={(e) => {
+                          // Fallback to icon if thumbnail fails to load
+                          e.currentTarget.style.display = 'none';
+                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                        }}
+                      />
+                    ) : null}
+                    <div className={`w-full h-48 bg-gradient-to-br from-primary/20 to-emerald-400/20 flex items-center justify-center ${video.thumbnail ? 'hidden' : ''}`}>
                       <svg className="w-16 h-16 text-primary/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                       </svg>
@@ -129,7 +219,7 @@ export default function VideoGallery({ videos, isLoading, showAllVideos = false 
                   
                   <div className="p-4">
                     <h3 className="font-medium mb-2 line-clamp-1" data-testid={`text-video-title-${video.id}`}>
-                      Video #{video.taskId.slice(-8)}
+                      {video.title || `Video #${video.taskId.slice(-8)}`}
                     </h3>
                     <p className="text-sm text-muted-foreground line-clamp-2 mb-3" data-testid={`text-video-prompt-${video.id}`}>
                       {video.prompt}

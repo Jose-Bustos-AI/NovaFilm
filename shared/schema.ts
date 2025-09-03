@@ -51,6 +51,8 @@ export const videos = pgTable("videos", {
   userId: varchar("user_id").references(() => users.id).notNull(),
   taskId: text("task_id").unique().notNull(),
   prompt: text("prompt").notNull(),
+  title: text("title"),
+  thumbnail: text("thumbnail"),
   providerVideoUrl: text("provider_video_url"),
   resolution: text("resolution"),
   fallbackFlag: boolean("fallback_flag").default(false),
