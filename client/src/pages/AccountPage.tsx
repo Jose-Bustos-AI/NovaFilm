@@ -12,6 +12,7 @@ import { Separator } from '@/components/ui/separator';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
 import { apiRequest } from '@/lib/queryClient';
+import { ArrowLeft } from 'lucide-react';
 
 interface UserProfile {
   id: string;
@@ -292,6 +293,19 @@ export function AccountPage() {
 
   return (
     <div className="container mx-auto py-8 px-4 space-y-6">
+      <div className="flex items-center gap-4 mb-2">
+        <Button 
+          variant="ghost" 
+          size="sm"
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
+          aria-label="Volver al Dashboard"
+          data-testid="button-back-dashboard"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Volver
+        </Button>
+      </div>
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold" data-testid="text-page-title">Mi Cuenta</h1>
         <Button 
