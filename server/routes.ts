@@ -182,8 +182,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const response = await generateChatResponse(fullConversation);
       
       // Check if response is JSON (ChatResponse) or string
-      if (typeof response === 'object' && response.status === 'ready') {
-        console.log(`[CHAT] JSON detected, final prompt ready: ${response.final_prompt_en?.substring(0, 50)}...`);
+      if (typeof response === 'object' && (response.prompt_en || response.final_prompt_en)) {
+        console.log(`[CHAT] JSON detected, final prompt ready: ${(response.prompt_en || response.final_prompt_en)?.substring(0, 50)}...`);
         res.json({ response: response, isJsonResponse: true });
       } else {
         res.json({ response: response });
