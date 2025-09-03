@@ -21,10 +21,13 @@ export interface IStorage {
   createJob(job: InsertJob): Promise<Job>;
   getJob(taskId: string): Promise<Job | undefined>;
   updateJobStatus(taskId: string, status: 'QUEUED' | 'PROCESSING' | 'READY' | 'FAILED', errorReason?: string): Promise<void>;
+  updateJobTaskId(oldTaskId: string, newTaskId: string): Promise<void>;
+  getUserJobs(userId: string): Promise<Job[]>;
   
   // Video operations
   createVideo(video: InsertVideo): Promise<Video>;
   updateVideo(taskId: string, updates: Partial<InsertVideo>): Promise<void>;
+  updateVideoTaskId(oldTaskId: string, newTaskId: string): Promise<void>;
   getUserVideos(userId: string): Promise<Video[]>;
   getVideo(id: string): Promise<Video | undefined>;
   getVideoByTaskId(taskId: string): Promise<Video | undefined>;
@@ -70,6 +73,21 @@ export class DatabaseStorage implements IStorage {
       .where(eq(jobs.taskId, taskId));
   }
 
+  async updateJobTaskId(oldTaskId: string, newTaskId: string): Promise<void> {
+    await db
+      .update(jobs)
+      .set({ taskId: newTaskId })
+      .where(eq(jobs.taskId, oldTaskId));
+  }
+
+  async getUserJobs(userId: string): Promise<Job[]> {
+    return await db
+      .select()
+      .from(jobs)
+      .where(eq(jobs.userId, userId))
+      .orderBy(desc(jobs.createdAt));
+  }
+
   // Video operations
   async createVideo(video: InsertVideo): Promise<Video> {
     const [newVideo] = await db.insert(videos).values(video).returning();
@@ -81,6 +99,13 @@ export class DatabaseStorage implements IStorage {
       .update(videos)
       .set(updates)
       .where(eq(videos.taskId, taskId));
+  }
+
+  async updateVideoTaskId(oldTaskId: string, newTaskId: string): Promise<void> {
+    await db
+      .update(videos)
+      .set({ taskId: newTaskId })
+      .where(eq(videos.taskId, oldTaskId));
   }
 
   async getUserVideos(userId: string): Promise<Video[]> {

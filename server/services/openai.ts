@@ -20,22 +20,22 @@ export async function refinePrompt(userInput: string): Promise<PromptRefinementR
       messages: [
         {
           role: "system",
-          content: `You are an AI video prompt expert. Transform the user's idea into an optimized English prompt for Kie.ai's Veo3 Fast model.
+          content: `You are an AI video prompt expert. Take the user's idea (in any language) and refine it into an optimized English prompt for Kie.ai's Veo3 Fast model.
 
-Guidelines:
-- Create cinematic, detailed prompts in English only
-- Include camera movement, lighting, and visual details
-- Optimize for video generation quality
+STRICT RULES:
+- Always translate and respond in English only
+- Create cinematic, detailed video prompts
+- Include camera movements, lighting, and visual details
 - Keep prompts under 500 characters
 - Use vivid, descriptive language
-- Specify aspect ratio (default 9:16 for mobile)
+- RESPOND ONLY WITH JSON - NO OTHER TEXT
 
-Respond with JSON in this exact format:
+Required JSON format (nothing else):
 {
-  "prompt": "<optimized English prompt>",
+  "prompt": "<refined English prompt>",
   "model": "veo3_fast",
   "aspectRatio": "9:16",
-  "seeds": <optional number>,
+  "seeds": null,
   "enableFallback": false
 }`
         },
@@ -45,16 +45,33 @@ Respond with JSON in this exact format:
         },
       ],
       response_format: { type: "json_object" },
-      temperature: 0.7,
     });
 
-    const result = JSON.parse(response.choices[0].message.content || "{}");
+    const content = response.choices[0].message.content || "{}";
+    
+    // Try to parse JSON response
+    let result;
+    try {
+      result = JSON.parse(content);
+    } catch (parseError) {
+      // Fallback: try to extract first JSON block
+      const jsonMatch = content.match(/\{[^}]*\}/);
+      if (jsonMatch) {
+        try {
+          result = JSON.parse(jsonMatch[0]);
+        } catch {
+          throw new Error("Failed to parse OpenAI response as JSON");
+        }
+      } else {
+        throw new Error("No valid JSON found in OpenAI response");
+      }
+    }
     
     return {
       prompt: result.prompt || userInput,
       model: "veo3_fast",
       aspectRatio: result.aspectRatio || "9:16",
-      seeds: result.seeds,
+      seeds: result.seeds || null,
       enableFallback: false,
     };
   } catch (error) {
@@ -81,7 +98,6 @@ export async function generateChatResponse(messages: Array<{ role: 'user' | 'ass
         },
         ...messages
       ],
-      temperature: 0.8,
       max_tokens: 500,
     });
 

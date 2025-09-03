@@ -1,0 +1,120 @@
+rompt para Replit: Fix OpenAI + System Prompt + Idempotencia callback + ETA + UI chat
+
+Felicitación por avances
+Excelente trabajo: la app levanta, el login con Replit Auth está OK, el pipeline dispara /api/create-job, el polling corre y el callback llega. Buen progreso.
+
+Contexto del ajuste
+Vemos 3 puntos a corregir:
+
+Error OpenAI temperature no soportado por el modelo.
+
+El chatbot no fuerza inglés + JSON y a veces manda el prompt en español.
+
+El callback de Kie.ai retorna taskId, pero el backend responde “unknown task” → falta idempotencia/upsert por taskId y trazas.
+Además, UX: mostrar ETA (“tardará unos minutos”) y arreglar el overflow del chat.
+
+Regla de oro
+No rompas nada que ya está funcionando ni cambies rutas/contratos existentes. Concéntrate solo en:
+
+OpenAI refine → sin temperature (o 1) y con system prompt estricto.
+
+Validación/override server-side del modelo (veo3_fast, 9:16).
+
+Idempotencia y upsert por taskId en callback.
+
+Mensaje de ETA en el chat.
+
+CSS menor del contenedor del chat (sin tocar estructura global).
+
+Instrucciones
+
+OpenAI refine-prompt
+
+En el servicio que llama a OpenAI, elimina el parámetro temperature o ponlo exactamente en 1 si el SDK lo requiere por tipado.
+
+Añade System Prompt que obligue:
+
+Tomar la idea del usuario (cualquier idioma), refinarla y traducirla al inglés.
+
+Responder únicamente con JSON:
+
+{
+  "prompt": "<refined EN prompt>",
+  "model": "veo3_fast",
+  "aspectRatio": "9:16",
+  "seeds": null,
+  "enableFallback": false
+}
+
+
+Prohibido devolver texto fuera del JSON.
+
+Si OpenAI devuelve algo no parseable, haz fallback: intenta parsear el primer bloque {...} y si falla, devuelve 400 con mensaje claro al frontend.
+
+Validación server-side antes de llamar a Kie.ai
+
+En /api/create-job aplica zod o validación equivalente:
+
+model debe ser "veo3_fast" → si viene distinto, override a "veo3_fast".
+
+aspectRatio por defecto "9:16".
+
+prompt obligatorio y en inglés (al menos caracteres ASCII; si detectas español por heurística simple, loguéalo y continúa).
+
+Log estructurado (sin secretos): userId, taskId, model, aspectRatio, tamaño del prompt.
+
+Inserción de job/videos ANTES de llamar a Kie.ai
+
+Asegúrate de crear jobs (status QUEUED) y videos placeholder con el taskId inmediatamente después de recibir la respuesta de veo/generate (o si ya lo haces, verifica que uses el taskId EXACTO de la respuesta).
+
+Guarda exactamente el string que devuelve Kie.ai; trim ambos lados, no alteres mayúsculas/minúsculas.
+
+Callback /api/veo-callback – idempotencia total
+
+Parsear payload: data.taskId, data.info.resultUrls[0], data.info.resolution, data.fallbackFlag.
+
+Upsert por taskId:
+
+Si existe en jobs, actualiza status=READY y agrega error_reason=NULL.
+
+Si NO existe (caso “unknown task”), crea el job con status=READY y vincúlalo al user_id si es deducible por videos.task_id; si no, crea el video igualmente con user_id=NULL y marca needs_linking=true (flag booleana nueva en videos si lo prefieres) para revisión.
+
+Actualiza videos por task_id con provider_video_url, resolution, fallback_flag.
+
+Idempotente: si ya está READY, no duplica ni rompe.
+
+Logs claros: callback_taskId, found_job (true/false), updated_video (true/false).
+
+Mensaje de ETA al usuario
+
+Tras POST /api/create-job exitoso, inserta en el chat un mensaje del asistente:
+
+“Got it! I’m generating your video with veo3_fast (9:16). This usually takes 2–5 minutes. I’ll update your gallery automatically.”
+
+Añade un badge “Processing” en la tarjeta del job, y ocúltalo al pasar a READY.
+
+UI – overflow del chat
+
+Aplica en el contenedor del chat: altura fija razonable (p.ej. h-[420px]), overflow-y-auto, padding consistente y max-w-prose o max-w-[640px] para los bubbles.
+
+Evita que los mensajes largos rompan el layout (break-words, whitespace-pre-wrap).
+
+Trazabilidad extra (opcional pero recomendada)
+
+Añade logs al saliente hacia Kie.ai (URL endpoint, modelo, aspect, longitud del prompt, taskId).
+
+Añade un GET /api/debug/job/:taskId que devuelva el estado y filas relacionadas (solo en NODE_ENV=development).
+
+Criterios de aceptación
+
+No vuelve a aparecer el error de OpenAI temperature.
+
+El payload que manda /api/create-job usa model: "veo3_fast" y aspectRatio: "9:16".
+
+El callback nunca vuelve a decir “unknown task”; si llega antes de la inserción, el handler upserta y deja todo en READY.
+
+En el chat aparece el mensaje de ETA inmediatamente después de crear el job.
+
+El chat ya no se desborda y mantiene scroll correcto.
+
+Logs muestran taskId coherente en create-job y en veo-callback.

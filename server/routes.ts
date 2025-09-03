@@ -99,10 +99,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/create-job', isAuthenticated, rateLimitMiddleware(5), async (req: any, res: Response) => {
     try {
       const userId = req.user.claims.sub;
-      const validatedData = createJobSchema.parse(req.body);
+      let validatedData = createJobSchema.parse(req.body);
+      
+      // Server-side validation and override
+      if (validatedData.aspectRatio !== "9:16") {
+        validatedData.aspectRatio = "9:16"; // Override to default
+      }
+      
+      // Ensure prompt is in English (basic heuristic)
+      if (validatedData.prompt.includes('ñ') || validatedData.prompt.includes('á') || validatedData.prompt.includes('é')) {
+        console.log(`[VALIDATION] Spanish detected in prompt for user ${userId}, continuing...`);
+      }
       
       const taskId = `veo_task_${randomUUID()}`;
       const callBackUrl = `${process.env.APP_BASE_URL || `https://${req.hostname}`}/api/veo-callback`;
+      
+      // Structured logging
+      console.log(`[CREATE-JOB] userId: ${userId}, taskId: ${taskId}, model: veo3_fast, aspectRatio: ${validatedData.aspectRatio}, promptLength: ${validatedData.prompt.length}`);
 
       // Create job and video records
       await storage.createJob({
@@ -119,6 +132,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Call Kie.ai API
       try {
+        console.log(`[KIE-API-CALL] Calling Kie.ai with model: veo3_fast, aspectRatio: ${validatedData.aspectRatio}, promptLength: ${validatedData.prompt.length}`);
+        
         const kieResponse = await kieService.generateVideo({
           prompt: validatedData.prompt,
           model: "veo3_fast",
@@ -128,15 +143,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
           enableFallback: false,
         });
 
-        await storage.updateJobStatus(taskId, 'PROCESSING');
+        console.log(`[KIE-API-SUCCESS] Received taskId: ${kieResponse.data.taskId}, runId: ${kieResponse.data.runId}`);
+        
+        // Update job and video with the exact taskId from Kie.ai response
+        const kieTaskId = kieResponse.data.taskId.trim();
+        await storage.updateJobTaskId(taskId, kieTaskId);
+        await storage.updateVideoTaskId(taskId, kieTaskId);
+        await storage.updateJobStatus(kieTaskId, 'PROCESSING');
 
         res.json({
           run_id: kieResponse.data.runId,
-          taskId: kieResponse.data.taskId,
+          taskId: kieTaskId,
           message: "Video generation started successfully"
         });
       } catch (kieError) {
-        console.error("Kie.ai API error:", kieError);
+        console.error(`[KIE-API-ERROR] taskId: ${taskId}, error:`, kieError);
         await storage.updateJobStatus(taskId, 'FAILED', (kieError as Error).message);
         res.status(500).json({ 
           message: "Failed to start video generation",
@@ -155,35 +176,70 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Callback route for Kie.ai
+  // Callback route for Kie.ai - idempotent handling
   app.post('/api/veo-callback', async (req: Request, res: Response) => {
     try {
       const callbackData = kieService.parseCallback(req.body);
       const { taskId, info, fallbackFlag } = callbackData.data;
+      
+      // Trim and normalize taskId
+      const normalizedTaskId = taskId.trim();
+      
+      console.log(`[VEO-CALLBACK] Received callback for taskId: ${normalizedTaskId}`);
 
       // Check if job exists
-      const job = await storage.getJob(taskId);
+      let job = await storage.getJob(normalizedTaskId);
+      let foundJob = !!job;
+      
       if (!job) {
-        console.warn(`Received callback for unknown task: ${taskId}`);
-        return res.status(200).json({ message: "Callback received" });
+        console.warn(`[VEO-CALLBACK] Unknown task: ${normalizedTaskId}, attempting to create job with READY status`);
+        
+        // Create job with READY status (unknown task case)
+        try {
+          job = await storage.createJob({
+            userId: 'unknown', // Will need manual linking later
+            taskId: normalizedTaskId,
+            status: 'READY',
+            errorReason: undefined,
+          });
+          foundJob = false;
+        } catch (createError) {
+          console.error(`[VEO-CALLBACK] Failed to create job for unknown task: ${normalizedTaskId}`, createError);
+          return res.status(200).json({ message: "Callback received but job creation failed" });
+        }
       }
 
-      if (callbackData.code === 200) {
-        // Success - update job and video
-        await storage.updateJobStatus(taskId, 'READY');
-        await storage.updateVideo(taskId, {
-          providerVideoUrl: info.resultUrls[0],
-          resolution: info.resolution,
-          fallbackFlag,
-        });
-      } else {
-        // Error - update job status
-        await storage.updateJobStatus(taskId, 'FAILED', callbackData.msg);
+      // Idempotent update - only update if not already READY
+      if (job.status !== 'READY') {
+        if (callbackData.code === 200) {
+          // Success - update job status
+          await storage.updateJobStatus(normalizedTaskId, 'READY', undefined);
+        } else {
+          // Error - update job status with error
+          await storage.updateJobStatus(normalizedTaskId, 'FAILED', callbackData.msg);
+        }
       }
+
+      // Update video if we have success data
+      let updatedVideo = false;
+      if (callbackData.code === 200 && info && info.resultUrls && info.resultUrls[0]) {
+        try {
+          await storage.updateVideo(normalizedTaskId, {
+            providerVideoUrl: info.resultUrls[0],
+            resolution: info.resolution,
+            fallbackFlag: fallbackFlag || false,
+          });
+          updatedVideo = true;
+        } catch (videoError) {
+          console.error(`[VEO-CALLBACK] Failed to update video for taskId: ${normalizedTaskId}`, videoError);
+        }
+      }
+      
+      console.log(`[VEO-CALLBACK] Processed - taskId: ${normalizedTaskId}, foundJob: ${foundJob}, updatedVideo: ${updatedVideo}`);
 
       res.status(200).json({ message: "Callback processed successfully" });
     } catch (error) {
-      console.error("Callback processing error:", error);
+      console.error("[VEO-CALLBACK] Processing error:", error);
       res.status(200).json({ message: "Callback received but processing failed" });
     }
   });
