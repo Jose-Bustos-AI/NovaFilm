@@ -36,26 +36,11 @@ export class ThumbnailService {
    * Generate a placeholder thumbnail using SVG data URL
    */
   private generatePlaceholderThumbnail(taskId: string): string {
-    // Create a simple SVG thumbnail with gradient and play icon
-    const svg = `
-      <svg width="320" height="180" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:0.3" />
-            <stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:0.2" />
-            <stop offset="100%" style="stop-color:#ec4899;stop-opacity:0.3" />
-          </linearGradient>
-        </defs>
-        <rect width="100%" height="100%" fill="url(#grad)"/>
-        <rect width="100%" height="100%" fill="rgba(0,0,0,0.4)"/>
-        <circle cx="160" cy="90" r="30" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
-        <polygon points="150,75 150,105 175,90" fill="rgba(255,255,255,0.8)"/>
-        <text x="160" y="140" text-anchor="middle" fill="rgba(255,255,255,0.6)" font-family="Arial" font-size="12">${taskId.slice(-8)}</text>
-      </svg>
-    `;
+    // Create a more compact SVG without indentation issues
+    const svg = `<svg width="320" height="180" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="grad-${taskId.slice(-8)}" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#3b82f6;stop-opacity:0.4" /><stop offset="50%" style="stop-color:#8b5cf6;stop-opacity:0.3" /><stop offset="100%" style="stop-color:#ec4899;stop-opacity:0.4" /></linearGradient></defs><rect width="100%" height="100%" fill="url(#grad-${taskId.slice(-8)})"/><rect width="100%" height="100%" fill="rgba(0,0,0,0.5)"/><circle cx="160" cy="90" r="25" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.4)" stroke-width="2"/><polygon points="150,80 150,100 170,90" fill="rgba(255,255,255,0.9)"/><text x="160" y="130" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="Arial" font-size="10">${taskId.slice(-8)}</text></svg>`;
     
-    // Convert SVG to data URL
-    const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+    // Convert SVG to data URL using URL encoding instead of base64
+    const dataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
     return dataUrl;
   }
   
