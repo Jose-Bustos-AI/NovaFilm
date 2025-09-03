@@ -108,8 +108,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         validatedData.aspectRatio = "9:16"; // Override to default
       }
       
-      // Generate random seeds if not provided
-      const seeds = validatedData.seeds ?? Math.floor(Math.random() * 1000000);
+      // Generate random seeds if not provided (Kie.ai requires 10000-99999 range)
+      const seeds = validatedData.seeds ?? Math.floor(Math.random() * 90000) + 10000;
       
       // Ensure prompt is in English (basic heuristic)
       if (validatedData.prompt.includes('ñ') || validatedData.prompt.includes('á') || validatedData.prompt.includes('é')) {
