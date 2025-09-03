@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AuthModal } from "@/components/auth-modal";
 
 export default function Landing() {
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [, navigate] = useLocation();
 
   const handleLogin = () => {
     setShowAuthModal(true);
@@ -95,7 +97,7 @@ export default function Landing() {
         onOpenChange={setShowAuthModal}
         onAuthSuccess={() => {
           setShowAuthModal(false);
-          window.location.href = '/';
+          navigate('/');
         }}
       />
     </div>

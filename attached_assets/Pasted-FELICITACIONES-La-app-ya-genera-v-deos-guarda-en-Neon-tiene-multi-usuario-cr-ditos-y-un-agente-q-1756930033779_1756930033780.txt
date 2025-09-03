@@ -1,0 +1,84 @@
+FELICITACIONES
+
+La app ya genera vídeos, guarda en Neon, tiene multi-usuario, créditos y un agente que conversa en español. Gran trabajo: estamos en un punto sólido para pulir UX.
+
+🧭 CONTEXTO
+
+En todas las páginas, al hacer scroll aparece un banner 404 (“Página no encontrada…”) que no corresponde.
+
+En Home el hero aparece duplicado (se renderiza la misma sección completa dos veces).
+
+En consola se ve un GET /api/auth/user → 401 (Unauthorized) cuando el usuario no está logueado. Eso no debería disparar overlays ni warnings ruidosos.
+
+🛡️ REGLA DE ORO (NO ROMPER NADA)
+
+No toques nada de generación de vídeos, llamadas a Kie, créditos, DB, ni rutas de API.
+
+Cambios estrictamente de UI y manejo de estados para 401/404.
+
+No elimines componentes; si están mal ubicados, muévelos o encapsúlalos con guard-clauses.
+
+Tras los cambios, la app debe comportarse exactamente igual salvo:
+a) No vuelve a aparecer el 404 flotante al hacer scroll.
+b) El hero de Home se renderiza una sola vez.
+c) Un 401 de /api/auth/user se maneja en silencio (usuario = null), sin errores en consola.
+
+✅ INSTRUCCIONES (paso a paso y precisas)
+
+Eliminar el banner 404 flotante
+
+Busca un componente tipo NotFoundBanner, Global404, Sticky404, o similar que se monte globalmente (probable en App.tsx, RootLayout, MainLayout o un ContentShell).
+
+Si existe un useEffect con window.addEventListener('scroll', ...) que muestra ese banner o fuerza un redirect, elimínalo.
+
+El 404 solo debe mostrarse en la ruta realmente inexistente (route fallback), no como overlay global.
+
+Si tienes una ruta comodín <Route path="*">, que renderice una página 404 estática o redirija a /, sin superponer UI sobre páginas válidas.
+
+Corregir el hero duplicado en Home
+
+Revisa Home.tsx / Landing.tsx / IndexPage.tsx (o similar). Es muy probable que el hero esté incluido dos veces:
+
+una en la propia página, y
+
+otra desde un layout/componente contenedor (p. ej., Layout que inyecta <Hero />).
+
+Deja el <Hero /> solo en un sitio (preferiblemente en la propia página Home).
+
+Verifica que no exista un Suspense/Skeleton que use el hero como fallback (esto también duplica visualmente). En tal caso, cambia el fallback por un placeholder simple, no el hero completo.
+
+Manejo silencioso del 401 en /api/auth/user
+
+Donde se consulta el usuario (p. ej., useQuery('auth/user', ...), getCurrentUser() o similar), ajusta para que:
+
+No haga console.error en 401.
+
+Interprete 401 → usuario = null y estado authenticated = false.
+
+retry: false y suspense: false para no disparar renderizados extra ni errores globales.
+
+La barra lateral y CTA deberán reaccionar a user === null mostrando “Entrar / Registrarse”, sin lanzar banners ni toasts de error.
+
+Revisión de enrutado y overlays
+
+Asegura que no exista ningún componente global que intercepte scroll o navegación para “redirigir a Home si no hay datos” mostrando un 404 intermedio. Ese patrón crea el banner fantasma que ves.
+
+Si hay lógica de “no hay resultados → mostramos 404”, muévela dentro de la página correspondiente (galería, detalle), como un empty state, no como 404.
+
+Pruebas de aceptación
+
+No logueado: carga Home → ningún error en consola; solo un hero; al hacer scroll, no aparece ningún 404.
+
+Logueado: navega a Dashboard, Galería y Mi Cuenta → sin overlays 404 al hacer scroll.
+
+Forzar 404 real (ruta inexistente) → muestra únicamente la página 404 normal (sin duplicar hero ni overlays en otras rutas).
+
+Checklist final
+
+0 apariciones del banner 404 al hacer scroll en todas las páginas.
+
+1 sola instancia de <Hero /> en Home.
+
+/api/auth/user 401 silencioso (sin logs rojos).
+
+Ningún cambio en lógica de vídeos, créditos o DB.

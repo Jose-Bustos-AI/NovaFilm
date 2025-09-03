@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { useLocation } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,16 +5,6 @@ import { AlertCircle, Home } from "lucide-react";
 
 export default function NotFound() {
   const [, navigate] = useLocation();
-
-  useEffect(() => {
-    // Immediate redirect for scroll-triggered 404s
-    const immediateTimer = setTimeout(() => {
-      console.log('🔄 NotFound: Immediate redirect to home');
-      navigate('/');
-    }, 100);
-
-    return () => clearTimeout(immediateTimer);
-  }, [navigate]);
 
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-background">
