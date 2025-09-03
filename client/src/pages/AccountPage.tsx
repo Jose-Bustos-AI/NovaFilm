@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import * as React from 'react';
+import { useLocation } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -40,6 +41,7 @@ interface CreditsData {
 export function AccountPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({
     firstName: '',
@@ -133,7 +135,7 @@ export function AccountPage() {
         description: "Has cerrado sesión exitosamente.",
       });
       
-      window.location.href = '/';
+      navigate('/');
     },
     onError: () => {
       toast({
