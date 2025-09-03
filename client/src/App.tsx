@@ -1,4 +1,5 @@
-import { Switch, Route } from "wouter";
+import { Switch, Route, useLocation } from "wouter";
+import { useEffect } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -12,6 +13,17 @@ import NotFound from "@/pages/not-found";
 
 function Router() {
   const { isAuthenticated, isLoading } = useAuth();
+  const [location] = useLocation();
+
+  // Debug logging to find what causes 404
+  useEffect(() => {
+    console.log('🔍 Route Debug:', {
+      location,
+      isAuthenticated,
+      isLoading,
+      timestamp: new Date().toISOString()
+    });
+  }, [location, isAuthenticated, isLoading]);
 
   // Show loading state during authentication check
   if (isLoading) {
