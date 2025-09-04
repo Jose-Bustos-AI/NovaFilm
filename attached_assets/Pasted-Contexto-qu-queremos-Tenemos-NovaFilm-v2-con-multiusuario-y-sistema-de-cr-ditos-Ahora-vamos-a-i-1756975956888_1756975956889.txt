@@ -1,0 +1,186 @@
+Contexto (qué queremos)
+
+Tenemos NovaFilm v2 con multiusuario y sistema de créditos.
+Ahora vamos a integrar Stripe (suscripciones) con 3 planes:
+
+BASIC → 4.97€ / mes → 5 créditos/mes
+
+PRO → 9.97€ / mes → 12 créditos/mes
+
+MAX → 19.97€ / mes → 30 créditos/mes
+
+Regla de negocio: 1 crédito = 1 vídeo.
+Cuando Stripe confirme un pago, debemos sumar los créditos que correspondan al usuario.
+Sin regalo de créditos al registrarse.
+Nada de romper lo que ya funciona (dashboard, generación, galería, chat, etc.).
+
+🧱 Regla de oro (NO romper lo existente)
+
+No tocar la lógica de generación ni el descuento de créditos actual.
+
+Añadir la capa de pagos encapsulada (rutas nuevas + columnas nuevas).
+
+Si hay cualquier duda, mantener el comportamiento actual por defecto.
+
+🔐 Variables/Secrets necesarias (añádelas en el panel de secretos)
+
+STRIPE_SECRET_KEY → clave privada de Stripe (modo test por ahora).
+
+STRIPE_WEBHOOK_SECRET → firma del webhook que Stripe te dará al crearlo.
+
+STRIPE_PRICE_BASIC → price_id del plan Basic (Stripe > Products > Price ID).
+
+STRIPE_PRICE_PRO → price_id del plan Pro.
+
+STRIPE_PRICE_MAX → price_id del plan Max.
+
+APP_BASE_URL → URL pública del frontend (la de Replit), para redirigir éxito/cancel.
+
+(Yo ya tengo los productos; te paso los 3 price_id cuando lo pidas.)
+
+🗄️ Cambios de base de datos (mínimos y seguros)
+
+Añadir columnas en users (no romper nada):
+
+stripe_customer_id text NULL
+
+active_plan text NULL — valores: basic | pro | max | null
+
+credits_renew_at timestamptz NULL — próximo momento de renovación (opcional)
+
+Nueva tabla stripe_events (para idempotencia):
+
+id text primary key (Stripe event id)
+
+type text
+
+payload jsonb
+
+created_at timestamptz default now()
+
+Si ya tenemos migrador, crear una migración. Si no, ejecutar alter table con cuidado.
+
+🧩 Lógica/Endpoints a implementar
+1) GET /api/billing/plans
+
+Devuelve al frontend los planes disponibles y sus price_id + créditos:
+
+[
+  {"key":"basic","priceId":STRIPE_PRICE_BASIC,"price":4.97,"credits":5},
+  {"key":"pro","priceId":STRIPE_PRICE_PRO,"price":9.97,"credits":12},
+  {"key":"max","priceId":STRIPE_PRICE_MAX,"price":19.97,"credits":30}
+]
+
+2) POST /api/billing/checkout
+
+Body: { planKey: "basic" | "pro" | "max" }
+
+Requiere usuario logueado (usar sesión actual).
+
+Si el usuario no tiene stripe_customer_id, crear Customer en Stripe con:
+
+email
+
+metadata.userId = <id interno>
+
+Crear Checkout Session (mode: subscription) con el price_id del plan.
+
+success_url = ${APP_BASE_URL}/account?status=success
+
+cancel_url = ${APP_BASE_URL}/account?status=cancel
+
+Devolver { url } para redirigir al checkout.
+
+3) POST /api/stripe/webhook
+
+Verificar firma con STRIPE_WEBHOOK_SECRET.
+
+Registrar todos los eventos en stripe_events (idempotencia: si ya existe, ignorar).
+
+Manejar (mínimo):
+
+checkout.session.completed
+
+Guardar stripe_customer_id si no lo teníamos.
+
+invoice.paid (el importante)
+
+Leer el subscription → items[0].price.id
+
+Mapear a plan:
+STRIPE_PRICE_BASIC → credits = 5,
+STRIPE_PRICE_PRO → 12,
+STRIPE_PRICE_MAX → 30
+
+Buscar usuario por customer (customerId ↔ user.stripe_customer_id).
+
+Sumar créditos en users.credits = credits + planCredits.
+
+Actualizar active_plan y opcional credits_renew_at con current_period_end.
+
+customer.subscription.deleted
+
+Poner active_plan = null (no quitar créditos existentes).
+
+Seguridad & robustez
+
+Idempotencia estricta por event.id.
+
+Si no se encuentra el usuario por customer, loggear y no fallar el 200 al webhook.
+
+Nunca restar créditos en webhooks.
+
+🖥️ UI/Frontend (mínimo necesario)
+
+En Mi Cuenta:
+
+Nueva sección “Planes y Suscripción” con los 3 planes (precio y créditos).
+
+Botón “Suscribirme” → llama a /api/billing/checkout y redirige a url.
+
+Mostrar active_plan si existe y créditos actuales (ya existen).
+
+Si active_plan es null → “Sin suscripción activa”.
+
+Notificar en UI ?status=success o ?status=cancel.
+
+No tocar dashboard ni galería. Solo añadir el bloque de planes en Mi Cuenta.
+
+🧪 Pruebas (pasos claros)
+
+Crear 1 usuario nuevo (sin Stripe) → credits iniciales: 0 (ya SIN regalo).
+
+Ir a Mi Cuenta → ver 3 planes.
+
+Suscribirse a PRO → pagar con tarjeta de prueba (4242…).
+
+Esperar webhook invoice.paid → comprobar que:
+
+users.credits aumenta en 12.
+
+users.active_plan = 'pro'.
+
+users.stripe_customer_id está guardado.
+
+Generar 1 vídeo → credits baja en 1 (lógica actual).
+
+Cancelar suscripción desde Stripe → recibir customer.subscription.deleted → active_plan = null (créditos quedan).
+
+Intentar suscribir al mismo usuario a MAX → checkout funciona y al pagarse suma 30.
+
+✅ Entregables
+
+Rutas nuevas funcionando: /api/billing/plans, /api/billing/checkout, /api/stripe/webhook.
+
+Migración DB aplicada (o cambios seguros realizados).
+
+UI de planes en “Mi Cuenta”.
+
+Documentación rápida en README con:
+
+Secrets necesarios
+
+URL de webhook para Stripe:
+https://<tu-repl>.replit.dev/api/stripe/webhook
+
+Mapa price_id → planKey → créditos

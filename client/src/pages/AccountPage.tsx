@@ -12,7 +12,7 @@ import { Separator } from '@/components/ui/separator';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
 import { apiRequest } from '@/lib/queryClient';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Crown, CreditCard } from 'lucide-react';
 
 interface UserProfile {
   id: string;
@@ -23,6 +23,7 @@ interface UserProfile {
   plan: string;
   creditsRemaining: number;
   subscriptionStatus: string;
+  activePlan: string | null;
   createdAt: string;
   hasPassword: boolean;
 }
@@ -37,6 +38,13 @@ interface CreditEntry {
 interface CreditsData {
   creditsRemaining: number;
   ledger: CreditEntry[];
+}
+
+interface BillingPlan {
+  key: string;
+  priceId: string;
+  price: number;
+  credits: number;
 }
 
 export function AccountPage() {
@@ -72,18 +80,42 @@ export function AccountPage() {
     }
   }, [profile]);
 
+  // Handle Stripe checkout status
+  React.useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const status = urlParams.get('status');
+    
+    if (status === 'success') {
+      toast({
+        title: "¡Pago exitoso!",
+        description: "Tu suscripción ha sido activada. Los créditos aparecerán en unos momentos.",
+      });
+      // Clean URL
+      window.history.replaceState({}, '', '/account');
+    } else if (status === 'cancel') {
+      toast({
+        title: "Pago cancelado",
+        description: "No se realizó ningún cargo. Puedes intentar de nuevo cuando gustes.",
+        variant: "destructive"
+      });
+      // Clean URL
+      window.history.replaceState({}, '', '/account');
+    }
+  }, [toast]);
+
   // Fetch credits data
   const { data: creditsData, isLoading: creditsLoading } = useQuery<CreditsData>({
     queryKey: ['/api/account/credits']
   });
 
+  // Fetch billing plans
+  const { data: billingPlans, isLoading: plansLoading } = useQuery<BillingPlan[]>({
+    queryKey: ['/api/billing/plans']
+  });
+
   // Update profile mutation
   const updateProfileMutation = useMutation({
-    mutationFn: (updates: any) => apiRequest('/api/account/me', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates)
-    }),
+    mutationFn: (updates: any) => apiRequest('PATCH', '/api/account/me', updates),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
       setIsEditing(false);
@@ -103,10 +135,7 @@ export function AccountPage() {
 
   // Cancel subscription mutation
   const cancelSubscriptionMutation = useMutation({
-    mutationFn: () => apiRequest('/api/account/subscription/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    }),
+    mutationFn: () => apiRequest('POST', '/api/account/subscription/cancel', {}),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
       toast({
@@ -127,9 +156,7 @@ export function AccountPage() {
   const logoutMutation = useMutation({
     mutationFn: () => apiRequest('POST', '/api/auth/logout', {}),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/auth/user'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
-      queryClient.clear(); // Clear all cached data
+      queryClient.clear();
       
       toast({
         title: "Sesión cerrada",
@@ -239,12 +266,28 @@ export function AccountPage() {
     });
   };
 
+  // Checkout mutation
+  const checkoutMutation = useMutation({
+    mutationFn: (planKey: string) => apiRequest('POST', '/api/billing/checkout', { planKey }),
+    onSuccess: (data: { url: string }) => {
+      window.location.href = data.url;
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "No se pudo crear la sesión de pago.",
+        variant: "destructive",
+      });
+    }
+  });
+
   const getReasonText = (reason: string) => {
     const reasons: Record<string, string> = {
       'video_generation': 'Generación de video',
       'promo': 'Bienvenida',
       'manual_grant': 'Recarga manual',
-      'refund': 'Reembolso'
+      'refund': 'Reembolso',
+      'subscription_payment': 'Pago de suscripción'
     };
     return reasons[reason] || reason;
   };
@@ -522,42 +565,8 @@ export function AccountPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex space-x-2">
-              <Button className="flex-1" data-testid="button-add-credits">
-                Añadir Créditos
-              </Button>
-              {profile.subscriptionStatus === 'active' && (
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button variant="outline" data-testid="button-cancel-subscription">
-                      Cancelar Suscripción
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>¿Cancelar suscripción?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Tu suscripción se cancelará pero mantienes acceso hasta el fin de tu ciclo actual.
-                        No se realizarán más cobros.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>No, mantener</AlertDialogCancel>
-                      <AlertDialogAction 
-                        onClick={() => cancelSubscriptionMutation.mutate()}
-                        className="bg-destructive hover:bg-destructive/90"
-                      >
-                        Sí, cancelar
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-              )}
-            </div>
-
             {!creditsLoading && creditsData && creditsData.ledger.length > 0 && (
               <>
-                <Separator />
                 <div>
                   <h4 className="text-sm font-medium mb-3">Historial de Créditos</h4>
                   <div className="space-y-2 max-h-64 overflow-y-auto">
@@ -584,6 +593,75 @@ export function AccountPage() {
             )}
           </CardContent>
         </Card>
+      </div>
+
+      {/* Subscription Plans Section */}
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-bold mb-2">Planes y Suscripción</h2>
+          <p className="text-muted-foreground">
+            {profile?.activePlan ? 
+              `Plan activo: ${profile.activePlan.toUpperCase()}` : 
+              'Sin suscripción activa'
+            }
+          </p>
+        </div>
+
+        {plansLoading ? (
+          <div className="flex justify-center py-8">
+            <div className="text-muted-foreground">Cargando planes...</div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {billingPlans?.map((plan) => (
+              <Card key={plan.key} className={`relative ${
+                profile?.activePlan === plan.key ? 'ring-2 ring-primary' : ''
+              }`}>
+                {plan.key === 'pro' && (
+                  <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                    <Badge className="bg-primary text-primary-foreground">
+                      <Crown className="h-3 w-3 mr-1" />
+                      Recomendado
+                    </Badge>
+                  </div>
+                )}
+                <CardHeader className="text-center">
+                  <CardTitle className="text-xl capitalize">{plan.key}</CardTitle>
+                  <div className="text-3xl font-bold">
+                    €{plan.price}
+                    <span className="text-sm font-normal text-muted-foreground">/mes</span>
+                  </div>
+                  <CardDescription>
+                    {plan.credits} créditos mensuales
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="text-center">
+                    <div className="text-sm text-muted-foreground">
+                      = {plan.credits} videos por mes
+                    </div>
+                  </div>
+                  
+                  {profile?.activePlan === plan.key ? (
+                    <Button variant="outline" disabled className="w-full" data-testid={`button-current-plan-${plan.key}`}>
+                      Plan Actual
+                    </Button>
+                  ) : (
+                    <Button 
+                      className="w-full" 
+                      onClick={() => checkoutMutation.mutate(plan.key)}
+                      disabled={checkoutMutation.isPending}
+                      data-testid={`button-subscribe-${plan.key}`}
+                    >
+                      <CreditCard className="h-4 w-4 mr-2" />
+                      {checkoutMutation.isPending ? 'Procesando...' : 'Suscribirme'}
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

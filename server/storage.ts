@@ -3,6 +3,7 @@ import {
   jobs,
   videos,
   creditsLedger,
+  stripeEvents,
   type User,
   type UpsertUser,
   type Job,
@@ -12,6 +13,8 @@ import {
   type InsertCreditsLedger,
   type CreditsLedger,
   type UpdateUserProfile,
+  type InsertStripeEvent,
+  type StripeEvent,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, isNull } from "drizzle-orm";
@@ -46,6 +49,13 @@ export interface IStorage {
   getUserCreditsHistory(userId: string, limit?: number): Promise<CreditsLedger[]>;
   updateUserProfile(userId: string, updates: UpdateUserProfile): Promise<User>;
   cancelSubscription(userId: string): Promise<void>;
+  
+  // Stripe operations
+  updateUserStripeInfo(userId: string, stripeCustomerId: string, activePlan?: string, creditsRenewAt?: Date): Promise<User>;
+  getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | undefined>;
+  addSubscriptionCredits(userId: string, credits: number, planKey: string): Promise<void>;
+  createStripeEvent(event: InsertStripeEvent): Promise<StripeEvent>;
+  getStripeEvent(eventId: string): Promise<StripeEvent | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -282,6 +292,68 @@ export class DatabaseStorage implements IStorage {
         updatedAt: new Date()
       })
       .where(eq(users.id, userId));
+  }
+
+  // Stripe operations
+  async updateUserStripeInfo(userId: string, stripeCustomerId: string, activePlan?: string, creditsRenewAt?: Date): Promise<User> {
+    const [user] = await db
+      .update(users)
+      .set({ 
+        stripeCustomerId,
+        activePlan,
+        creditsRenewAt,
+        updatedAt: new Date()
+      })
+      .where(eq(users.id, userId))
+      .returning();
+    
+    return user;
+  }
+
+  async getUserByStripeCustomerId(stripeCustomerId: string): Promise<User | undefined> {
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.stripeCustomerId, stripeCustomerId));
+    return user;
+  }
+
+  async addSubscriptionCredits(userId: string, credits: number, planKey: string): Promise<void> {
+    await db.transaction(async (tx) => {
+      // Get current credits
+      const [user] = await tx
+        .select({ creditsRemaining: users.creditsRemaining })
+        .from(users)
+        .where(eq(users.id, userId));
+
+      if (!user) return;
+
+      // Add credits to user
+      await tx
+        .update(users)
+        .set({ 
+          creditsRemaining: user.creditsRemaining + credits,
+          updatedAt: new Date()
+        })
+        .where(eq(users.id, userId));
+
+      // Add entry to ledger
+      await tx.insert(creditsLedger).values({
+        userId,
+        delta: credits,
+        reason: 'subscription_payment'
+      });
+    });
+  }
+
+  async createStripeEvent(event: InsertStripeEvent): Promise<StripeEvent> {
+    const [stripeEvent] = await db.insert(stripeEvents).values(event).returning();
+    return stripeEvent;
+  }
+
+  async getStripeEvent(eventId: string): Promise<StripeEvent | undefined> {
+    const [event] = await db.select().from(stripeEvents).where(eq(stripeEvents.id, eventId));
+    return event;
   }
 }
 

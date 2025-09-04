@@ -5,13 +5,26 @@ import { setupLocalAuth, isAuthenticated, getUserId } from "./localAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema, checkoutRequestSchema } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { sql, desc, eq } from "drizzle-orm";
 import { db } from "./db";
 import argon2 from "argon2";
 import expressRateLimit from "express-rate-limit";
+import Stripe from "stripe";
+
+// Initialize Stripe
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2025-08-27.basil',
+});
+
+// Billing plans configuration
+const BILLING_PLANS = {
+  basic: { priceId: process.env.STRIPE_PRICE_BASIC!, price: 4.97, credits: 5 },
+  pro: { priceId: process.env.STRIPE_PRICE_PRO!, price: 9.97, credits: 12 },
+  max: { priceId: process.env.STRIPE_PRICE_MAX!, price: 19.97, credits: 30 }
+} as const;
 
 // In-memory polling controllers
 const pollingControllers = new Map<string, { controller: AbortController; attempts: number }>();
@@ -1197,6 +1210,213 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // === Billing Routes ===
+
+  // GET /api/billing/plans - Return available subscription plans
+  app.get('/api/billing/plans', (req: Request, res: Response) => {
+    try {
+      const plans = [
+        { key: "basic", priceId: BILLING_PLANS.basic.priceId, price: BILLING_PLANS.basic.price, credits: BILLING_PLANS.basic.credits },
+        { key: "pro", priceId: BILLING_PLANS.pro.priceId, price: BILLING_PLANS.pro.price, credits: BILLING_PLANS.pro.credits },
+        { key: "max", priceId: BILLING_PLANS.max.priceId, price: BILLING_PLANS.max.price, credits: BILLING_PLANS.max.credits }
+      ];
+      
+      res.json(plans);
+    } catch (error) {
+      console.error("Get billing plans error:", error);
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // POST /api/billing/checkout - Create Stripe checkout session
+  app.post('/api/billing/checkout', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        return res.status(401).json({ message: "No autenticado" });
+      }
+
+      const body = checkoutRequestSchema.parse(req.body);
+      const { planKey } = body;
+
+      // Get user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "Usuario no encontrado" });
+      }
+
+      let customerId = user.stripeCustomerId;
+
+      // Create Stripe customer if doesn't exist
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email: user.email!,
+          metadata: {
+            userId: userId
+          }
+        });
+        customerId = customer.id;
+        
+        // Update user with Stripe customer ID
+        await storage.updateUserStripeInfo(userId, customerId);
+      }
+
+      // Create checkout session
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        mode: 'subscription',
+        line_items: [
+          {
+            price: BILLING_PLANS[planKey].priceId,
+            quantity: 1,
+          }
+        ],
+        success_url: `${process.env.APP_BASE_URL}/account?status=success`,
+        cancel_url: `${process.env.APP_BASE_URL}/account?status=cancel`,
+        metadata: {
+          planKey,
+          userId
+        }
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error("Create checkout session error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // POST /api/stripe/webhook - Handle Stripe webhooks
+  app.post('/api/stripe/webhook', async (req: Request, res: Response) => {
+    const sig = req.headers['stripe-signature'];
+    const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
+
+    let event: Stripe.Event;
+
+    try {
+      // Verify webhook signature
+      event = stripe.webhooks.constructEvent(req.body, sig as string, endpointSecret);
+    } catch (err) {
+      console.error(`Webhook signature verification failed:`, err);
+      return res.status(400).send(`Webhook Error: ${err}`);
+    }
+
+    try {
+      // Check for idempotency - if event already processed, skip
+      const existingEvent = await storage.getStripeEvent(event.id);
+      if (existingEvent) {
+        console.log(`Event ${event.id} already processed, skipping`);
+        return res.json({ received: true });
+      }
+
+      // Store event for idempotency
+      await storage.createStripeEvent({
+        id: event.id,
+        type: event.type,
+        payload: event as any
+      });
+
+      // Handle different event types
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const customerId = session.customer as string;
+          
+          if (customerId) {
+            // Find user by customer ID and save Stripe customer ID
+            const user = await storage.getUserByStripeCustomerId(customerId);
+            if (!user) {
+              // Try to find by metadata
+              const userId = session.metadata?.userId;
+              if (userId) {
+                await storage.updateUserStripeInfo(userId, customerId);
+              }
+            }
+          }
+          break;
+        }
+
+        case 'invoice.payment_succeeded': {
+          const invoice = event.data.object as Stripe.Invoice;
+          const customerId = invoice.customer as string;
+          const subscriptionId = (invoice as any).subscription;
+          
+          if (subscriptionId && customerId) {
+            // Get subscription to find the price ID
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId as string);
+            const priceId = subscription.items.data[0]?.price.id;
+            
+            if (priceId) {
+              // Map price ID to plan and credits
+              let planKey: string | null = null;
+              let credits = 0;
+              
+              for (const [key, plan] of Object.entries(BILLING_PLANS)) {
+                if (plan.priceId === priceId) {
+                  planKey = key;
+                  credits = plan.credits;
+                  break;
+                }
+              }
+              
+              if (planKey && credits > 0) {
+                // Find user by customer ID
+                const user = await storage.getUserByStripeCustomerId(customerId);
+                if (user) {
+                  // Add credits and update plan
+                  await storage.addSubscriptionCredits(user.id, credits, planKey);
+                  const subscriptionData = subscription as any;
+                  await storage.updateUserStripeInfo(
+                    user.id, 
+                    customerId, 
+                    planKey,
+                    subscriptionData.current_period_end ? new Date(subscriptionData.current_period_end * 1000) : undefined
+                  );
+                  
+                  console.log(`Added ${credits} credits for plan ${planKey} to user ${user.id}`);
+                } else {
+                  console.error(`User not found for Stripe customer ${customerId}`);
+                }
+              }
+            }
+          }
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const subscription = event.data.object as Stripe.Subscription;
+          const customerId = subscription.customer as string;
+          
+          if (customerId) {
+            const user = await storage.getUserByStripeCustomerId(customerId);
+            if (user) {
+              // Remove active plan but keep existing credits
+              await storage.updateUserStripeInfo(user.id, customerId, undefined);
+              console.log(`Subscription canceled for user ${user.id}`);
+            }
+          }
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      console.error('Webhook processing error:', error);
+      res.status(500).json({ error: 'Webhook processing failed' });
     }
   });
 
