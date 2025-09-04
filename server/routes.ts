@@ -1313,6 +1313,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     console.log(`billing> STRIPE WEBHOOK: type=${event.type} id=${event.id}`);
+    
+    // DEBUG: Log full event structure to understand why priceId is null
+    if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.paid') {
+      console.log(`billing> DEBUG EVENT:`, JSON.stringify(event.data.object, null, 2));
+    }
 
     try {
       // Check for idempotency - if event already processed, skip
