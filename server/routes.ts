@@ -1355,7 +1355,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   // Map price ID to plan
                   for (const [key, plan] of Object.entries(BILLING_PLANS)) {
                     if (plan.priceId === priceId) {
-                      const renewDate = new Date((subscription as any).current_period_end * 1000);
+                      const periodEnd = (subscription as any).current_period_end;
+                      const renewDate = periodEnd ? new Date(periodEnd * 1000) : undefined;
                       await storage.updateUserStripeInfo(userId, customerId, key, renewDate);
                       console.log(`📋 Set user ${userId} to plan ${key}, renews ${renewDate}`);
                       break;
@@ -1376,15 +1377,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.log(`💰 Processing invoice.payment_succeeded event`);
           const invoice = event.data.object as Stripe.Invoice;
           const customerId = invoice.customer as string;
-          const subscriptionId = (invoice as any).subscription as string;
+          const subscriptionId = invoice.subscription as string;
           
           console.log(`Customer ID: ${customerId}, Subscription ID: ${subscriptionId}`);
+          console.log(`Invoice lines:`, invoice.lines?.data?.map(line => ({ 
+            price_id: line.price?.id, 
+            amount: line.amount,
+            description: line.description 
+          })));
           
-          if (subscriptionId && customerId) {
-            try {
-              // Get subscription to find the price ID
-              const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-              const priceId = subscription.items.data[0]?.price.id;
+          if (customerId) {
+            // Try to get subscription ID from invoice lines if not directly available
+            let finalSubscriptionId = subscriptionId;
+            if (!finalSubscriptionId && invoice.lines?.data?.length > 0) {
+              const line = invoice.lines.data[0];
+              if (line.subscription) {
+                finalSubscriptionId = line.subscription as string;
+              }
+            }
+            
+            console.log(`Final subscription ID: ${finalSubscriptionId}`);
+            
+            if (finalSubscriptionId) {
+              try {
+                // Get subscription to find the price ID
+                const subscription = await stripe.subscriptions.retrieve(finalSubscriptionId);
+                const priceId = subscription.items.data[0]?.price.id;
               
               console.log(`Price ID from subscription: ${priceId}`);
               
@@ -1422,11 +1440,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
               } else {
                 console.log(`⚠️ No price ID found in subscription`);
               }
-            } catch (error) {
-              console.error(`Error processing invoice payment:`, error);
+              } catch (error) {
+                console.error(`Error processing invoice payment:`, error);
+              }
+            } else {
+              console.log(`⚠️ Could not find subscription ID for invoice`);
+              
+              // Fallback: try to add credits based on invoice lines
+              if (invoice.lines?.data?.length > 0) {
+                const line = invoice.lines.data[0];
+                const priceId = line.price?.id;
+                
+                if (priceId) {
+                  // Map price ID to plan and credits
+                  for (const [key, plan] of Object.entries(BILLING_PLANS)) {
+                    if (plan.priceId === priceId) {
+                      const user = await storage.getUserByStripeCustomerId(customerId);
+                      if (user) {
+                        await storage.addSubscriptionCredits(user.id, plan.credits, key);
+                        await storage.updateUserStripeInfo(user.id, customerId, key);
+                        console.log(`💳 Added ${plan.credits} credits (fallback) for plan ${key} to user ${user.id}`);
+                      }
+                      break;
+                    }
+                  }
+                }
+              }
             }
           } else {
-            console.log(`⚠️ Missing subscription ID or customer ID`);
+            console.log(`⚠️ Missing customer ID`);
           }
           break;
         }
