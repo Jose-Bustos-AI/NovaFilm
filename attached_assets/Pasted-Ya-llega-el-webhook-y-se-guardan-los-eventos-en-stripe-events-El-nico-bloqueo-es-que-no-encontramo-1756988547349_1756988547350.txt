@@ -1,0 +1,127 @@
+Ya llega el webhook y se guardan los eventos en stripe_events. El único bloqueo es que no encontramos priceId de forma fiable en algunos eventos, así que no se activa el plan ni se suman créditos.
+
+📌 Contexto
+
+En los logs aparece priceId=null y luego SKIPPED.
+
+Stripe a veces no trae price “plano”; viene debajo de invoice.lines.data[].price, o hay que expandir datos (líneas, checkout line_items, subscription items).
+
+Necesitamos un extractor robusto, con fallbacks y, si falta, re-hidratar (consultar a Stripe con expand) para encontrar el priceId.
+
+🛡️ REGLA DE ORO
+No toques login, consumo de créditos por vídeo, ni la UI. Solo toca el módulo de billing/stripe. Idempotencia estricta (nada de créditos duplicados) y 200 OK ante casos saltables (sin reventar la app).
+
+✅ Instrucciones (haz exactamente esto)
+
+Extractor único y robusto (getStripeBillingContext)
+Crea una función centralizada que, dado el event del webhook, devuelva:
+
+customerId
+
+subscriptionId
+
+priceId
+
+quantity (si existiera)
+
+periodEnd (para credits_renew_at)
+
+Soporta estos tipos:
+
+invoice.payment_succeeded
+
+invoice.paid
+
+checkout.session.completed
+
+Orden de extracción por tipo:
+
+A. invoice.payment_succeeded / invoice.paid
+
+Intenta event.data.object.lines.data[0].price.id.
+
+Si price viene sin expandir, rehidrata: stripe.invoices.retrieve(invoiceId, { expand: ['lines.data.price', 'subscription.items.data.price'] }).
+
+Si aún no hay priceId, usa invoice.subscription → stripe.subscriptions.retrieve(subId, { expand: ['items.data.price'] }) y toma subscription.items.data[0].price.id.
+
+periodEnd: invoice.lines.data[0].period.end (o, si falta, invoice.period_end).
+
+B. checkout.session.completed
+
+Intenta event.data.object.line_items.data[0].price.id.
+
+Si no viene, rehidrata el checkout: stripe.checkout.sessions.retrieve(sessionId, { expand: ['line_items.data.price', 'subscription', 'subscription.items.data.price'] }).
+
+Si tampoco, usa session.subscription → expande subscription.items.data.price y toma el price.id.
+
+Notas clave
+
+Nunca devuelvas priceId=null sin intentar expand.
+
+Si después de expandir sigue faltando: log billing> SKIPPED: no priceId after expands y responde 200.
+
+Normalizador de plan
+
+Compara priceId con process.env.STRIPE_PRICE_BASIC / PRO / MAX.
+
+Asegúrate de que son los de modo test (empiezan por price_ y los copiaste de Stripe test).
+
+Asigna créditos: basic=5, pro=12, max=30. Si no coincide con ninguno: SKIPPED: priceId not recognized (200 OK).
+
+Aplicación atómica (transacción + idempotencia)
+
+Busca user por stripe_customer_id = customerId. Si no hay, SKIPPED: no user for customer (200 OK).
+
+En una transacción:
+
+Verifica que stripe_events.id = event.id no existe (idempotencia).
+
+Suma users.credits += credits.
+
+users.active_plan = basic|pro|max.
+
+users.credits_renew_at = periodEnd (ISO).
+
+Inserta en credits_ledger (reason=stripe_<plan>_renewal, amount=+credits).
+
+Inserta en stripe_events (cierra la tx).
+
+Log final: billing> APPLIED: +<credits> plan=<plan> renewAt=<ISO> user=<id> priceId=<priceId>
+
+Cancelación
+
+Para customer.subscription.deleted:
+
+En tx: active_plan=NULL, credits_renew_at=NULL, guarda stripe_events.
+
+Log: billing> SUB CANCELLED user=<id>
+
+Backfill/reproceso
+
+Crea una tarea (endpoint admin temporal) que recorra stripe_events más recientes y reprocese solo invoice.payment_succeeded / invoice.paid.
+
+Usa la misma función getStripeBillingContext y misma lógica de aplicación con idempotencia (si ya está aplicado, SKIPPED: duplicate).
+
+Log: billing> BACKFILL: <event.id> -> applied|skipped|error
+
+Logs y QA
+
+Todos los logs del webhook con prefijo billing>.
+
+Logs mínimos clave:
+
+billing> STRIPE WEBHOOK: type=<type> id=<evt>
+
+billing> context: customer=<cus> subscription=<sub> priceId=<priceId> quantity=<q> periodEnd=<ts>
+
+billing> APPLIED: +<credits> plan=<plan> renewAt=<ISO> user=<id>
+
+Prueba con evento de prueba desde Stripe: invoice.payment_succeeded.
+
+Después, ejecuta el backfill para aplicar los de stripe_events que ya existen (sin duplicar).
+
+Sanity checks
+
+Verifica que process.env.STRIPE_PRICE_* son los IDs test correctos.
+
+Mantén respuestas 200 OK en “casos saltables” para que Stripe no reintente eternamente.

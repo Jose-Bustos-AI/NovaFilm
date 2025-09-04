@@ -270,6 +270,13 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
+  async getAllStripeEvents(): Promise<StripeEvent[]> {
+    return await db
+      .select()
+      .from(stripeEvents)
+      .orderBy(desc(stripeEvents.createdAt));
+  }
+
   async updateUserProfile(userId: string, updates: UpdateUserProfile): Promise<User> {
     const [user] = await db
       .update(users)
