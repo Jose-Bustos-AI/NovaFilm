@@ -67,11 +67,15 @@ async function startPolling(taskId: string) {
       // Call Kie.ai record-info endpoint
       const recordInfo = await kieService.getRecordInfo(taskId);
       
-      if (recordInfo.data?.info?.resultUrls && recordInfo.data.info.resultUrls.length > 0) {
+      // Check if video is ready - Kie.ai sends successFlag=1 when complete
+      const hasSuccessFlag = recordInfo.data?.successFlag === 1;
+      const hasResultUrls = recordInfo.data?.response?.resultUrls && recordInfo.data.response.resultUrls.length > 0;
+      
+      if (hasSuccessFlag && hasResultUrls) {
         // Success - update video and job status
         await storage.updateVideo(taskId, {
-          providerVideoUrl: recordInfo.data.info.resultUrls[0],
-          resolution: recordInfo.data.info.resolution || "1080p",
+          providerVideoUrl: recordInfo.data.response.resultUrls[0],
+          resolution: recordInfo.data.response.resolution || "720p",
           fallbackFlag: recordInfo.data.fallbackFlag || false,
         });
         await storage.updateJobStatus(taskId, 'READY', undefined);
@@ -488,8 +492,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         providerStatus: recordInfo,
-        resultUrls: recordInfo.data?.info?.resultUrls || [],
-        resolution: recordInfo.data?.info?.resolution || null,
+        resultUrls: recordInfo.data?.response?.resultUrls || [],
+        resolution: recordInfo.data?.response?.resolution || null,
         fallbackFlag: recordInfo.data?.fallbackFlag || false,
         lastUpdated: new Date().toISOString()
       });
