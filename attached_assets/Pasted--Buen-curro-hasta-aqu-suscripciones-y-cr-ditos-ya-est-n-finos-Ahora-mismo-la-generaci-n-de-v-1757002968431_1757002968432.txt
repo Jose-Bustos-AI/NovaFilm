@@ -1,0 +1,102 @@
+¡Buen curro hasta aquí! 👏 (suscripciones y créditos ya están finos).
+Ahora mismo la generación de vídeos se queda en “Processing” indefinidamente. Antes funcionaba.
+
+REGLA DE ORO (no romper nada)
+
+Nada de refactors grandes, ni tocar pagos, auth, UI o DB fuera de lo que sigue.
+
+Cambios mínimos, reversibles y con logs. Si algo falla, rollback inmediato.
+
+Mantener compatibilidad con los jobs ya en curso.
+
+CONTEXTO
+
+El dashboard muestra jobs en “Processing” que no salen de ahí.
+
+Antes funcionaba → se ha roto recientemente (posible regresión de cola/worker, callback, polling o mapeo de estados del proveedor).
+
+El front ya muestra “We’ll reconcile automatically”, así que existen rutas/cron de reconciliación.
+
+OBJETIVO (Definition of Done)
+
+Un job nuevo pasa por: queued → processing → ready / failed sin quedarse colgado.
+
+La UI refleja el estado real y actualiza a “Ready” cuando el vídeo está.
+
+Reconciliación automática: si un job se queda > X min en “processing”, se reconsulta al proveedor y se corrige el estado.
+
+Ningún impacto en pagos/usuarios/suscripciones.
+
+PLAN DE ACCIÓN (paso a paso)
+
+Diagnóstico rápido
+
+Server logs: buscar errores en endpoints de creación/consulta de jobs, timeouts, exceptions no capturadas.
+
+Ver si el worker/cron de reconciliación está corriendo. Si depende del mismo proceso, confirmar que no quedó deshabilitado tras los cambios de billing.
+
+Confirmar que guardamos provider_job_id al crear el job y que el polling lo usa.
+
+Comprobar mapeo de estados del proveedor → queued|running|succeeded|failed → queued|processing|ready|failed.
+
+Hardening de estados
+
+En DB (tabla videos/jobs): asegurar campos status, provider_job_id, thumbnail_url, video_url, updated_at.
+
+Crear transición segura:
+
+a) Al crear: queued.
+
+b) Enviar al proveedor → processing y guardar provider_job_id.
+
+c) Polling/cron: consultar estado remoto y:
+
+succeeded → descargar/registrar video_url, generar/guardar thumbnail (frame 1s), set ready.
+
+failed → set failed (+ error_message).
+
+Timeout de seguridad: si processing > 12 min, forzar reconsulta; si el proveedor dice succeeded, pasamos a ready. Si no, reintento (hasta 2) y luego failed.
+
+Reconciliación automática
+
+Tarea cada 2 min: WHERE status='processing' AND updated_at < now()-interval '2 minutes'.
+
+Reconsulta al proveedor y corrige estado. Loguear "reconciled_to=ready|failed".
+
+API y front
+
+GET /api/videos y GET /api/videos/:id: deben devolver status, progress (si existe), video_url, thumbnail_url.
+
+En el front (lista de Active Jobs): repoll cada 5s mientras status in ['queued','processing']. Al cambiar a ready, refrescar tarjeta.
+
+Si failed, mostrar toast con opción “Reintentar” que crea un nuevo job (sin borrar el fallido).
+
+Logs
+
+Prefijo video-jobs>:
+
+CREATE queued id=<local_id> provider_job_id=<id>
+
+POLL id=<local_id> provider_status=<..> mapped=<..>
+
+RECONCILE id=<local_id> old=processing new=ready
+
+ERROR id=<local_id> msg=<..>
+
+Pruebas
+
+Crear 2 vídeos seguidos → deben llegar a ready (<5 min).
+
+Forzar un job “viejo” en processing → ver que la reconciliación lo corrige.
+
+Confirmar que se genera thumbnail (frame ~1s) y aparece en la galería.
+
+ENTREGABLES
+
+Fix pequeño en worker/polling + cron de reconciliación (si no estaba activo).
+
+Mapeo de estados robusto + timeout con reintentos.
+
+Logs video-jobs> activados.
+
+Sin tocar ni romper: pagos, auth, UI de billing, DB de usuarios.

@@ -1,0 +1,119 @@
+La integración con Stripe y la pantalla de planes ya están. Los webhooks llegan y se registran en stripe_events, pero no se está activando el plan ni sumando créditos tras el pago.
+
+📌 Contexto
+
+El webhook de Stripe sí recibe checkout.session.completed, invoice.paid y invoice.payment_succeeded (vemos filas en stripe_events).
+
+El usuario tiene stripe_customer_id, pero active_plan y credits_renew_at quedan vacíos.
+
+Es muy probable que el handler no esté identificando el priceId del invoice o no matchee con los env vars STRIPE_PRICE_* (modo test).
+
+Necesitamos reforzar el handler para que sea robusto, idempotente y con logs claros.
+
+🛡️ REGLA DE ORO
+No rompas nada de lo existente: autenticación, consumo de 1 crédito por vídeo, UI, galería, jobs y DB actual. Aísla todos los cambios al flujo de billing/stripe. No añadas créditos “gratis”. Mantén todo en modo test.
+
+✅ Instrucciones (paso a paso, sin romper nada)
+
+Logs de diagnóstico (sin spam):
+
+En el endpoint /api/stripe/webhook, imprime SIEMPRE (nivel info) estas líneas cuando llegue un evento:
+
+STRIPE WEBHOOK: type=<event.type> id=<event.id>
+
+Para invoice.*: customerId=<customerId> priceId=<priceId> subscriptionId=<subscriptionId>
+
+matchedPlan=<basic|pro|max|null>
+
+userId=<id|null>
+
+Al finalizar: APPLIED: +<credits> plan=<plan> renewAt=<isoDate> o SKIPPED: <motivo>.
+
+Prefijo fijo: billing> . Ejemplo: billing> STRIPE WEBHOOK: type=invoice.paid id=evt_...
+
+Robustecer la detección del priceId:
+
+Para eventos invoice.payment_succeeded y invoice.paid, intenta obtener el Price ID en este orden:
+
+invoice.lines.data[0].price.id
+
+invoice.lines.data[0].plan.id (APIs antiguas)
+
+Si no está, recupera la subscription (invoice.subscription) y toma subscription.items.data[0].price.id.
+
+Si después de esto priceId sigue vacío: log SKIPPED y termina (no es error 500).
+
+Match contra env vars (modo test):
+
+Usa solo estos env vars ya existentes (deben empezar por price_):
+
+STRIPE_PRICE_BASIC → 5 créditos
+
+STRIPE_PRICE_PRO → 12 créditos
+
+STRIPE_PRICE_MAX → 30 créditos
+
+Si priceId no coincide con ninguno: log SKIPPED (priceId not recognized) y termina.
+
+Encontrar usuario por stripe_customer_id:
+
+Busca el user con stripe_customer_id = invoice.customer.
+
+Si no existe: log SKIPPED (no user for customer) y termina.
+
+Aplicar crédito y plan (transaccional + idempotencia):
+
+Calcula renewAt con invoice.lines.data[0].period.end o invoice.period_end; si no existe, Date.now().
+
+En una sola transacción DB:
+
+users.credits += credits
+
+users.active_plan = (basic|pro|max)
+
+users.credits_renew_at = renewAt
+
+Inserta el registro en credits_ledger con reason='stripe_<plan>_renewal'
+
+Inserta el evento en stripe_events al final de la tx para idempotencia real.
+
+Si el event.id ya existe en stripe_events, no apliques (log SKIPPED: duplicate event).
+
+Cancelar suscripción:
+
+Para customer.subscription.deleted: poner users.active_plan = NULL, users.credits_renew_at = NULL.
+
+Registrar el evento en stripe_events (idempotente). Log: billing> SUB CANCELLED user=<id>.
+
+No toques: checkout, UI/planes, consumo 1 crédito por vídeo, seed, galería, jobs. No regales créditos al registro.
+
+Ajustes de configuración (sin código expuesto):
+
+Verifica que los env vars en Replit (STRIPE_PRICE_BASIC/PRO/MAX) son Price IDs de TEST (empiezan por price_).
+
+No uses Product IDs (prod_…).
+
+Mantén STRIPE_WEBHOOK_SECRET en test y la URL del webhook:
+/api/stripe/webhook de la instancia actual (la misma que ya recibe eventos).
+
+Pruebas y criterios de aceptación:
+
+Reenvía desde Stripe los últimos eventos invoice.payment_succeeded o invoice.paid.
+
+En consola debes ver:
+
+billing> STRIPE WEBHOOK: type=invoice.paid …
+
+billing> customerId=… priceId=price_… matchedPlan=basic|pro|max userId=…
+
+billing> APPLIED: +5 plan=basic renewAt=… (o 12/30 según el plan)
+
+En DB: users.active_plan actualizado, users.credits incrementados, users.credits_renew_at con fecha, nueva fila en credits_ledger, fila en stripe_events.
+
+En “Mi Cuenta”: el plan activo debe mostrarse y los créditos incrementados.
+
+Si algo falla:
+
+Nunca devolver 500 por no encontrar priceId o user; devuelve 200 con log SKIPPED.
+
+500 solo ante fallos reales (firma inválida, error DB).

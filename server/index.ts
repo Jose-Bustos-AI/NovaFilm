@@ -3,6 +3,10 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 
 const app = express();
+
+// Raw body for Stripe webhooks
+app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -38,6 +42,20 @@ app.use((req, res, next) => {
 
 (async () => {
   const server = await registerRoutes(app);
+  
+  // Auto-fix thumbnails in development
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[DEV] Auto-starting thumbnail backfill...');
+    setTimeout(async () => {
+      try {
+        const { thumbnailService } = await import('./services/thumbnail');
+        await thumbnailService.backfillThumbnails();
+        console.log('[DEV] Auto thumbnail backfill completed');
+      } catch (error) {
+        console.error('[DEV] Auto thumbnail backfill failed:', error);
+      }
+    }, 3000); // 3 seconds after startup
+  }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

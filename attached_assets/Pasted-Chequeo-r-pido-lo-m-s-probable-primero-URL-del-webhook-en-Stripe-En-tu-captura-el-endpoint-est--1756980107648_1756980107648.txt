@@ -1,0 +1,140 @@
+Chequeo rápido (lo más probable primero)
+
+URL del webhook en Stripe
+
+En tu captura, el endpoint está como
+https://<tu-repl>.replit.dev/ (la raíz).
+
+Debe ser EXACTAMENTE:
+https://<tu-repl>.replit.dev/api/stripe/webhook
+
+Si la URL no tiene /api/stripe/webhook, Stripe está llamando a la raíz y tu app nunca procesa el evento → no suma créditos.
+
+Secret de firma
+
+En Stripe (página del webhook) pulsa “Revelar” y copia el valor que empieza por whsec_….
+
+En Replit, ponlo en STRIPE_WEBHOOK_SECRET (y reinicia el servidor).
+
+Modo TEST vs LIVE
+
+Asegúrate de estar en modo Test tanto para:
+
+STRIPE_SECRET_KEY (de test)
+
+Los Price IDs (de test, empiezan por price_…)
+
+El webhook creado en test mode (no en live)
+
+Si mezclas modos, el webhook no “ve” los eventos.
+
+Eventos suscritos
+
+Debe escuchar mínimo:
+
+checkout.session.completed
+
+invoice.payment_succeeded ← este es el que añade créditos en suscripciones
+
+customer.subscription.deleted (para marcar baja)
+
+Ya los tenías, perfecto.
+
+Verificar si Stripe te está pegando
+
+En la página del webhook, pulsa “Ver registros”.
+
+Comprueba que los eventos llegan y la respuesta de tu servidor es 200.
+
+Si ves 404/401/400 → la URL/secret/parseo está mal.
+
+Si “No se puede entregar” → no está alcanzando tu endpoint.
+
+Si tras lo de arriba sigue igual, aplica esto en el backend
+
+Hay dos fallos comunes de implementación:
+
+A) El body parser rompe la firma
+
+Stripe necesita el raw body para verificar la firma del webhook. Si tu app hace app.use(express.json()) antes del webhook, la verificación falla.
+
+En el servidor, para esa ruta usa raw:
+
+// antes de registrar el handler de webhook:
+app.post('/api/stripe/webhook',
+  express.raw({ type: 'application/json' }),
+  stripeWebhookHandler
+);
+
+// y asegúrate de NO tener express.json() aplicado antes a esta ruta.
+// El resto de rutas sí pueden usar express.json().
+
+
+Y dentro del handler:
+
+const sig = req.headers['stripe-signature'];
+let event;
+try {
+  event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET!);
+} catch (err) {
+  return res.status(400).send(`Webhook Error: ${(err as Error).message}`);
+}
+
+B) No estás mapeando el usuario con el customer de Stripe
+
+La forma robusta:
+
+En checkout.session.completed:
+
+Guardar en tu tabla users el stripe_customer_id = session.customer.
+
+Guardar activePlan desde session.subscription (price id de la primera línea) y creditsRenewAt (period_end del current_period).
+
+En invoice.payment_succeeded:
+
+Buscar el user por stripe_customer_id (NO solo por email).
+
+Sumar los créditos según el priceId del invoice (primera línea), y actualizar creditsRenewAt.
+
+Qué hacer ahora mismo (concreto y rápido)
+
+Cambia la URL del webhook en Stripe a:
+https://<tu-repl>.replit.dev/api/stripe/webhook.
+
+Verifica STRIPE_WEBHOOK_SECRET en Replit (whsec_…); reinicia.
+
+Prueba desde Stripe:
+
+En la página del webhook, pulsa “Enviar evento de prueba” y elige invoice.payment_succeeded.
+
+Mira “Ver registros”: ¿tu servidor responde 200?
+
+Si sí: recarga “Mi Cuenta” → deberían aparecer créditos/plan.
+
+Si ves 400 o “No se puede entregar”:
+
+Asegura el raw body para esa ruta como indiqué.
+
+Añade logs en el handler para ver qué evento llega (event.type) y qué haces.
+
+Si quieres, pásale esto a Replit (prompt corto)
+
+Contexto: El Checkout ya funciona pero tras pagar no se activan créditos ni plan. El webhook de Stripe no está impactando.
+
+Regla de oro: No romper nada que ya funciona. Solo ajustar lo necesario para que el webhook procese los eventos y sume créditos/active el plan.
+
+Tareas:
+
+Asegura que la ruta POST /api/stripe/webhook usa express.raw({ type: 'application/json' }) y verifica firma con STRIPE_WEBHOOK_SECRET (whsec_…).
+
+En Stripe hemos configurado el endpoint con URL https://<mi-repl>.replit.dev/api/stripe/webhook (no la raíz).
+
+Loguea temporalmente event.type y responde 200 siempre tras procesar sin error.
+
+En checkout.session.completed: guarda user.stripe_customer_id = session.customer y el activePlan + creditsRenewAt.
+
+En invoice.payment_succeeded: busca el user por stripe_customer_id y suma créditos según el priceId de la línea (Basic=5, Pro=12, Max=30). Actualiza activePlan si cambiaron y creditsRenewAt.
+
+Mantén idempotencia con una tabla stripe_events para no aplicar dos veces.
+
+Verificación: En Stripe → Webhooks → “Ver registros”, todos los eventos deben devolver 200. Tras un pago de prueba, “Mi Cuenta” debe mostrar plan activo y créditos sumados.
