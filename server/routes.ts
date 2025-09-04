@@ -1240,7 +1240,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .select({
           activePlan: users.activePlan,
           creditsRenewAt: users.creditsRenewAt,
-          stripeSubscriptionId: users.stripeSubscriptionId
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          stripeCustomerId: users.stripeCustomerId
         })
         .from(users)
         .where(eq(users.id, userId));
@@ -1256,10 +1257,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
         status = 'active';
         
         // Check with Stripe if subscription is set to cancel
-        if (user.stripeSubscriptionId) {
+        let subscriptionId = user.stripeSubscriptionId;
+        
+        // Fallback: if no subscription ID stored, find it via customer (same logic as cancel endpoint)
+        if (!subscriptionId && user.stripeCustomerId) {
           try {
-            const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+            const subscriptions = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'active',
+              limit: 1
+            });
+            
+            if (subscriptions.data.length === 0) {
+              // Try other statuses
+              const allSubs = await stripe.subscriptions.list({
+                customer: user.stripeCustomerId,
+                status: 'all',
+                limit: 10
+              });
+              
+              const activeSub = allSubs.data.find(sub => 
+                ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+              );
+              
+              if (activeSub) {
+                subscriptionId = activeSub.id;
+              }
+            } else {
+              subscriptionId = subscriptions.data[0].id;
+            }
+          } catch (error) {
+            console.log(`billing> Could not find subscription via customer: ${error}`);
+          }
+        }
+        
+        if (subscriptionId) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
             cancelAtPeriodEnd = subscription.cancel_at_period_end || false;
+            console.log(`billing> SUBSCRIPTION STATUS: sub=${subscriptionId} cancelAtPeriodEnd=${cancelAtPeriodEnd}`);
             // Keep status as 'active' even if cancel_at_period_end=true
             // The UI will use cancelAtPeriodEnd flag to show appropriate message
           } catch (error) {
