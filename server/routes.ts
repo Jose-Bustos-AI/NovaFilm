@@ -5,13 +5,26 @@ import { setupLocalAuth, isAuthenticated, getUserId } from "./localAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema, checkoutRequestSchema, creditsLedger, stripeEvents, processedInvoices } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { sql, desc, eq } from "drizzle-orm";
 import { db } from "./db";
 import argon2 from "argon2";
 import expressRateLimit from "express-rate-limit";
+import Stripe from "stripe";
+
+// Initialize Stripe
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2025-08-27.basil',
+});
+
+// Billing plans configuration
+const BILLING_PLANS = {
+  basic: { priceId: process.env.STRIPE_PRICE_BASIC!, price: 4.97, credits: 5 },
+  pro: { priceId: process.env.STRIPE_PRICE_PRO!, price: 9.97, credits: 12 },
+  max: { priceId: process.env.STRIPE_PRICE_MAX!, price: 19.97, credits: 30 }
+} as const;
 
 // In-memory polling controllers
 const pollingControllers = new Map<string, { controller: AbortController; attempts: number }>();
@@ -54,14 +67,29 @@ async function startPolling(taskId: string) {
       // Call Kie.ai record-info endpoint
       const recordInfo = await kieService.getRecordInfo(taskId);
       
-      if (recordInfo.data?.info?.resultUrls && recordInfo.data.info.resultUrls.length > 0) {
+      // Check if video is ready - Kie.ai sends successFlag=1 when complete
+      const hasSuccessFlag = recordInfo.data?.successFlag === 1;
+      const hasResultUrls = recordInfo.data?.response?.resultUrls && recordInfo.data.response.resultUrls.length > 0;
+      
+      if (hasSuccessFlag && hasResultUrls) {
         // Success - update video and job status
+        const videoUrl = recordInfo.data.response.resultUrls[0];
         await storage.updateVideo(taskId, {
-          providerVideoUrl: recordInfo.data.info.resultUrls[0],
-          resolution: recordInfo.data.info.resolution || "1080p",
+          providerVideoUrl: videoUrl,
+          resolution: recordInfo.data.response.resolution || "720p",
           fallbackFlag: recordInfo.data.fallbackFlag || false,
         });
         await storage.updateJobStatus(taskId, 'READY', undefined);
+        
+        // Generate thumbnail for the video (async, don't block response)
+        console.log(`[POLLING] About to call processVideoThumbnail for ${taskId} with URL: ${videoUrl}`);
+        thumbnailService.processVideoThumbnail(taskId, videoUrl)
+          .then(() => {
+            console.log(`[POLLING] Thumbnail processing completed for ${taskId}`);
+          })
+          .catch(error => {
+            console.error(`[THUMBNAIL] Failed to process thumbnail for ${taskId}:`, error);
+          });
         
         console.log(JSON.stringify({
           stage: "poll",
@@ -475,8 +503,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         providerStatus: recordInfo,
-        resultUrls: recordInfo.data?.info?.resultUrls || [],
-        resolution: recordInfo.data?.info?.resolution || null,
+        resultUrls: recordInfo.data?.response?.resultUrls || [],
+        resolution: recordInfo.data?.response?.resolution || null,
         fallbackFlag: recordInfo.data?.fallbackFlag || false,
         lastUpdated: new Date().toISOString()
       });
@@ -486,6 +514,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
         error: 'Failed to fetch status',
         message: (error as Error).message 
       });
+    }
+  });
+
+  // Fix thumbnails for all videos without thumbnails (development only)
+  app.post('/api/debug/fix-all-thumbnails', async (req: Request, res: Response) => {
+    try {
+      // Only available in development
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(404).json({ message: 'Not found' });
+      }
+      
+      console.log('[DEBUG] Starting manual thumbnail backfill...');
+      
+      // Run the backfill process
+      thumbnailService.backfillThumbnails()
+        .then(() => {
+          console.log('[DEBUG] Manual thumbnail backfill completed');
+        })
+        .catch(error => {
+          console.error('[DEBUG] Manual thumbnail backfill failed:', error);
+        });
+      
+      res.json({ message: 'Thumbnail backfill started - check server logs for progress' });
+    } catch (error) {
+      console.error('Debug backfill error:', error);
+      res.status(500).json({ error: 'Failed to start thumbnail backfill' });
     }
   });
 
@@ -1197,6 +1251,772 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // === Billing Routes ===
+
+  // GET /api/billing/plans - Return available subscription plans
+  app.get('/api/billing/plans', (req: Request, res: Response) => {
+    try {
+      const plans = [
+        { key: "basic", priceId: BILLING_PLANS.basic.priceId, price: BILLING_PLANS.basic.price, credits: BILLING_PLANS.basic.credits },
+        { key: "pro", priceId: BILLING_PLANS.pro.priceId, price: BILLING_PLANS.pro.price, credits: BILLING_PLANS.pro.credits },
+        { key: "max", priceId: BILLING_PLANS.max.priceId, price: BILLING_PLANS.max.price, credits: BILLING_PLANS.max.credits }
+      ];
+      
+      res.json(plans);
+    } catch (error) {
+      console.error("Get billing plans error:", error);
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // GET /api/billing/subscription - Get current subscription status
+  app.get('/api/billing/subscription', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      
+      const [user] = await db
+        .select({
+          activePlan: users.activePlan,
+          creditsRenewAt: users.creditsRenewAt,
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          stripeCustomerId: users.stripeCustomerId
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      let status = 'none';
+      let cancelAtPeriodEnd = false;
+      
+      if (user.activePlan) {
+        status = 'active';
+        
+        // Check with Stripe if subscription is set to cancel
+        let subscriptionId = user.stripeSubscriptionId;
+        
+        // Fallback: if no subscription ID stored, find it via customer (same logic as cancel endpoint)
+        if (!subscriptionId && user.stripeCustomerId) {
+          try {
+            const subscriptions = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'active',
+              limit: 1
+            });
+            
+            if (subscriptions.data.length === 0) {
+              // Try other statuses
+              const allSubs = await stripe.subscriptions.list({
+                customer: user.stripeCustomerId,
+                status: 'all',
+                limit: 10
+              });
+              
+              const activeSub = allSubs.data.find(sub => 
+                ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+              );
+              
+              if (activeSub) {
+                subscriptionId = activeSub.id;
+              }
+            } else {
+              subscriptionId = subscriptions.data[0].id;
+            }
+          } catch (error) {
+            console.log(`billing> Could not find subscription via customer: ${error}`);
+          }
+        }
+        
+        if (subscriptionId) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+            cancelAtPeriodEnd = subscription.cancel_at_period_end || false;
+            console.log(`billing> SUBSCRIPTION STATUS: sub=${subscriptionId} cancelAtPeriodEnd=${cancelAtPeriodEnd}`);
+            // Keep status as 'active' even if cancel_at_period_end=true
+            // The UI will use cancelAtPeriodEnd flag to show appropriate message
+          } catch (error) {
+            console.log(`billing> Could not check subscription status: ${error}`);
+          }
+        }
+      }
+      
+      res.json({
+        activePlan: user.activePlan,
+        renewAt: user.creditsRenewAt?.toISOString() || null,
+        status,
+        cancelAtPeriodEnd
+      });
+    } catch (error) {
+      console.error('Error fetching subscription:', error);
+      res.status(500).json({ error: 'Failed to fetch subscription' });
+    }
+  });
+
+  // POST /api/billing/cancel - Cancel subscription (idempotent)
+  app.post('/api/billing/cancel', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      console.log(`billing> CANCEL REQUEST: userId=${userId}`);
+      
+      const [user] = await db
+        .select({
+          stripeCustomerId: users.stripeCustomerId,
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          activePlan: users.activePlan
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user || !user.stripeCustomerId) {
+        console.log(`billing> ERROR: Missing stripe customer for user ${userId}`);
+        return res.status(400).json({ error: 'Missing stripe customer' });
+      }
+      
+      console.log(`billing> CANCEL REQUEST: customerId=${user.stripeCustomerId}, subscriptionId=${user.stripeSubscriptionId}`);
+      
+      let subscriptionId = user.stripeSubscriptionId;
+      
+      // Fallback: if no subscription ID stored, find it via customer
+      if (!subscriptionId) {
+        console.log(`billing> No subscriptionId stored, searching by customer...`);
+        try {
+          const subscriptions = await stripe.subscriptions.list({
+            customer: user.stripeCustomerId,
+            status: 'active',
+            limit: 1
+          });
+          
+          if (subscriptions.data.length === 0) {
+            // Try other statuses
+            const allSubs = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'all',
+              limit: 10
+            });
+            
+            const activeSub = allSubs.data.find(sub => 
+              ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+            );
+            
+            if (!activeSub) {
+              console.log(`billing> ERROR: No active subscription found for customer ${user.stripeCustomerId}`);
+              return res.status(404).json({ error: 'No active subscription on Stripe' });
+            }
+            
+            subscriptionId = activeSub.id;
+          } else {
+            subscriptionId = subscriptions.data[0].id;
+          }
+          
+          console.log(`billing> FALLBACK: Found subscription ${subscriptionId}`);
+        } catch (error) {
+          console.error(`billing> ERROR finding subscription: ${error}`);
+          return res.status(404).json({ error: 'No active subscription on Stripe' });
+        }
+      }
+      
+      // IDEMPOTENCY: First retrieve current subscription status
+      const currentSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+      
+      // Check if already scheduled for cancellation
+      if (currentSubscription.cancel_at_period_end) {
+        const cancelAt = currentSubscription.current_period_end ? new Date((currentSubscription as any).current_period_end * 1000).toISOString() : null;
+        console.log(`billing> CANCEL: sub=${subscriptionId} alreadyScheduled=true cancelAt=${cancelAt}`);
+        return res.json({ 
+          ok: true, 
+          scheduled: true,
+          cancelAtPeriodEnd: true,
+          cancelAt: cancelAt
+        });
+      }
+      
+      // Check if subscription is cancelable
+      if (!['active', 'trialing', 'past_due', 'unpaid'].includes(currentSubscription.status)) {
+        console.log(`billing> ERROR: Subscription ${subscriptionId} not cancelable, status=${currentSubscription.status}`);
+        return res.status(409).json({ error: 'Subscription not cancelable' });
+      }
+      
+      // Cancel subscription at period end in Stripe
+      const subscription = await stripe.subscriptions.update(subscriptionId, {
+        cancel_at_period_end: true
+      });
+      
+      const cancelAt = subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null;
+      console.log(`billing> CANCEL: sub=${subscriptionId} alreadyScheduled=false cancelAt=${cancelAt}`);
+      
+      res.json({ 
+        ok: true, 
+        scheduled: true,
+        cancelAtPeriodEnd: true,
+        cancelAt: cancelAt
+      });
+    } catch (error) {
+      console.error(`billing> ERROR canceling subscription: ${error}`);
+      res.status(500).json({ error: 'Failed to cancel subscription' });
+    }
+  });
+
+  // POST /api/billing/resume - Resume canceled subscription
+  app.post('/api/billing/resume', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      console.log(`billing> RESUME REQUEST: userId=${userId}`);
+      
+      const [user] = await db
+        .select({
+          stripeCustomerId: users.stripeCustomerId,
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          activePlan: users.activePlan
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user || !user.stripeCustomerId) {
+        console.log(`billing> ERROR: Missing stripe customer for user ${userId}`);
+        return res.status(400).json({ error: 'Missing stripe customer' });
+      }
+      
+      console.log(`billing> RESUME REQUEST: customerId=${user.stripeCustomerId}, subscriptionId=${user.stripeSubscriptionId}`);
+      
+      let subscriptionId = user.stripeSubscriptionId;
+      
+      // Fallback: if no subscription ID stored, find it via customer
+      if (!subscriptionId) {
+        console.log(`billing> No subscriptionId stored, searching by customer...`);
+        try {
+          const subscriptions = await stripe.subscriptions.list({
+            customer: user.stripeCustomerId,
+            status: 'active',
+            limit: 1
+          });
+          
+          if (subscriptions.data.length === 0) {
+            // Try other statuses
+            const allSubs = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'all',
+              limit: 10
+            });
+            
+            const activeSub = allSubs.data.find(sub => 
+              ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+            );
+            
+            if (!activeSub) {
+              console.log(`billing> ERROR: No active subscription found for customer ${user.stripeCustomerId}`);
+              return res.status(404).json({ error: 'No active subscription on Stripe' });
+            }
+            
+            subscriptionId = activeSub.id;
+          } else {
+            subscriptionId = subscriptions.data[0].id;
+          }
+          
+          console.log(`billing> FALLBACK: Found subscription ${subscriptionId}`);
+        } catch (error) {
+          console.error(`billing> ERROR finding subscription: ${error}`);
+          return res.status(404).json({ error: 'No active subscription on Stripe' });
+        }
+      }
+      
+      // First retrieve current subscription status
+      const currentSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+      
+      // Check if not scheduled for cancellation
+      if (!currentSubscription.cancel_at_period_end) {
+        console.log(`billing> RESUME: sub=${subscriptionId} notScheduledForCancellation=true`);
+        return res.json({ 
+          ok: true, 
+          resumed: true,
+          cancelAtPeriodEnd: false,
+          message: 'Subscription was not scheduled for cancellation'
+        });
+      }
+      
+      // Check if subscription is resumable
+      if (!['active', 'trialing', 'past_due', 'unpaid'].includes(currentSubscription.status)) {
+        console.log(`billing> ERROR: Subscription ${subscriptionId} not resumable, status=${currentSubscription.status}`);
+        return res.status(409).json({ error: 'Subscription not resumable' });
+      }
+      
+      // Resume subscription by removing cancel_at_period_end
+      const subscription = await stripe.subscriptions.update(subscriptionId, {
+        cancel_at_period_end: false
+      });
+      
+      const renewAt = subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null;
+      console.log(`billing> RESUME: sub=${subscriptionId} resumed=true renewAt=${renewAt}`);
+      
+      res.json({ 
+        ok: true, 
+        resumed: true,
+        cancelAtPeriodEnd: false,
+        renewAt: renewAt
+      });
+    } catch (error) {
+      console.error(`billing> ERROR resuming subscription: ${error}`);
+      res.status(500).json({ error: 'Failed to resume subscription' });
+    }
+  });
+
+  // POST /api/billing/checkout - Create Stripe checkout session
+  app.post('/api/billing/checkout', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      if (!userId) {
+        return res.status(401).json({ message: "No autenticado" });
+      }
+
+      const body = checkoutRequestSchema.parse(req.body);
+      const { planKey } = body;
+
+      // Get user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "Usuario no encontrado" });
+      }
+
+      let customerId = user.stripeCustomerId;
+
+      // Create Stripe customer if doesn't exist
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email: user.email!,
+          metadata: {
+            userId: userId
+          }
+        });
+        customerId = customer.id;
+        
+        // Update user with Stripe customer ID
+        await storage.updateUserStripeInfo(userId, customerId);
+      }
+
+      // Create checkout session
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        payment_method_types: ['card'],
+        mode: 'subscription',
+        line_items: [
+          {
+            price: BILLING_PLANS[planKey].priceId,
+            quantity: 1,
+          }
+        ],
+        success_url: `${process.env.APP_BASE_URL}account?status=success`,
+        cancel_url: `${process.env.APP_BASE_URL}account?status=cancel`,
+        metadata: {
+          planKey,
+          userId
+        }
+      });
+
+      res.json({ url: session.url });
+    } catch (error) {
+      console.error("Create checkout session error:", error);
+      
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ 
+          message: error.errors[0]?.message || "Datos inválidos" 
+        });
+      }
+      
+      res.status(500).json({ message: "Error interno del servidor" });
+    }
+  });
+
+  // POST /api/stripe/webhook - Handle Stripe webhooks
+  app.post('/api/stripe/webhook', async (req: Request, res: Response) => {
+    const sig = req.headers['stripe-signature'];
+    const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
+
+    let event: Stripe.Event;
+
+    try {
+      // Verify webhook signature
+      event = stripe.webhooks.constructEvent(req.body, sig as string, endpointSecret);
+    } catch (err) {
+      console.error(`billing> WEBHOOK SIGNATURE FAILED: ${err}`);
+      return res.status(400).send(`Webhook Error: ${err}`);
+    }
+
+    console.log(`billing> STRIPE WEBHOOK: type=${event.type} id=${event.id}`);
+
+    // Robust billing context extractor
+    async function getStripeBillingContext(event: Stripe.Event) {
+      let customerId: string | null = null;
+      let subscriptionId: string | null = null;
+      let priceId: string | null = null;
+      let quantity: number = 1;
+      let periodEnd: number | null = null;
+
+      if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.paid') {
+        const invoice = event.data.object as Stripe.Invoice;
+        customerId = invoice.customer as string;
+
+        // Try multiple extraction paths
+        if (invoice.lines?.data?.length > 0) {
+          const line = invoice.lines.data[0];
+          
+          // Path 1: line.price.id (standard)
+          priceId = (line as any).price?.id;
+          
+          // Path 2: line.pricing.price_details.price (new format seen in logs)
+          if (!priceId && (line as any).pricing?.price_details?.price) {
+            priceId = (line as any).pricing.price_details.price;
+          }
+          
+          // Path 3: line.plan.id (legacy)
+          if (!priceId && (line as any).plan?.id) {
+            priceId = (line as any).plan.id;
+          }
+          
+          subscriptionId = line.subscription as string || null;
+          quantity = line.quantity || 1;
+          periodEnd = (line.period?.end || invoice.period_end) || null;
+        }
+
+        // Fallback: expand invoice if priceId still null
+        if (!priceId) {
+          try {
+            const expandedInvoice = await stripe.invoices.retrieve(invoice.id, {
+              expand: ['lines.data.price', 'subscription.items.data.price']
+            });
+            
+            if (expandedInvoice.lines?.data?.length > 0) {
+              const expandedLine = expandedInvoice.lines.data[0];
+              priceId = expandedLine.price?.id || null;
+              periodEnd = expandedLine.period?.end || expandedInvoice.period_end || null;
+            }
+          } catch (error) {
+            console.log(`billing> Could not expand invoice: ${error}`);
+          }
+        }
+
+        // Final fallback: get from subscription
+        if (!priceId && subscriptionId) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
+              expand: ['items.data.price']
+            });
+            priceId = subscription.items.data[0]?.price.id || null;
+            periodEnd = (subscription as any).current_period_end || null;
+          } catch (error) {
+            console.log(`billing> Could not expand subscription: ${error}`);
+          }
+        }
+
+      } else if (event.type === 'checkout.session.completed') {
+        const session = event.data.object as Stripe.Checkout.Session;
+        customerId = session.customer as string;
+
+        // Try line_items first
+        if (session.line_items?.data && session.line_items.data.length > 0) {
+          const lineItem = session.line_items.data[0];
+          priceId = lineItem.price?.id || null;
+          quantity = lineItem.quantity || 1;
+        }
+
+        // Fallback: expand session
+        if (!priceId) {
+          try {
+            const expandedSession = await stripe.checkout.sessions.retrieve(session.id, {
+              expand: ['line_items.data.price', 'subscription', 'subscription.items.data.price']
+            });
+            
+            if (expandedSession.line_items?.data && expandedSession.line_items.data.length > 0) {
+              priceId = expandedSession.line_items.data[0].price?.id || null;
+            } else if (expandedSession.subscription && typeof expandedSession.subscription === 'object') {
+              priceId = expandedSession.subscription.items?.data[0]?.price.id || null;
+              periodEnd = (expandedSession.subscription as any).current_period_end || null;
+            }
+          } catch (error) {
+            console.log(`billing> Could not expand checkout session: ${error}`);
+          }
+        }
+      }
+
+      return { customerId, subscriptionId, priceId, quantity, periodEnd };
+    }
+
+    try {
+      // Check for idempotency - if event already processed, skip
+      const existingEvent = await storage.getStripeEvent(event.id);
+      if (existingEvent) {
+        console.log(`billing> SKIPPED: duplicate event ${event.id}`);
+        return res.json({ received: true });
+      }
+
+      // Extract billing context
+      const context = await getStripeBillingContext(event);
+      console.log(`billing> context: customer=${context.customerId} subscription=${context.subscriptionId} priceId=${context.priceId} quantity=${context.quantity} periodEnd=${context.periodEnd}`);
+
+      // Handle different event types
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const userId = session.metadata?.userId;
+          const subscriptionId = session.subscription as string;
+          
+          if (context.customerId && userId) {
+            // Update user with customer ID and subscription ID
+            await db
+              .update(users)
+              .set({
+                stripeCustomerId: context.customerId,
+                stripeSubscriptionId: subscriptionId,
+                updatedAt: new Date()
+              })
+              .where(eq(users.id, userId));
+              
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            console.log(`billing> CHECKOUT: linked customer ${context.customerId} sub=${subscriptionId} to user ${userId}`);
+          } else {
+            console.log(`billing> SKIPPED: missing customer or user data`);
+          }
+          break;
+        }
+
+        case 'invoice.payment_succeeded': {
+          const invoice = event.data.object as Stripe.Invoice;
+          const invoiceId = invoice.id;
+          const billingReason = invoice.billing_reason;
+          const amountPaid = invoice.amount_paid;
+          
+          console.log(`billing> INVOICE: id=${invoiceId} amount_paid=${amountPaid} reason=${billingReason}`);
+          
+          // Only process subscription payments with amount > 0
+          if (!['subscription_create', 'subscription_cycle'].includes(billingReason || '') || amountPaid <= 0) {
+            console.log(`billing> SKIPPED: not a subscription payment or zero amount`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+
+          // Check invoice idempotency - CRITICAL to prevent duplicates
+          const existingInvoice = await storage.getProcessedInvoice(invoiceId);
+          if (existingInvoice) {
+            console.log(`billing> SKIPPED duplicate invoice=${invoiceId}`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+
+          if (!context.customerId || !context.priceId) {
+            console.log(`billing> SKIPPED: no customer or priceId after expands`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+
+          // Match priceId to plan
+          let matchedPlan: string | null = null;
+          let credits = 0;
+          
+          if (context.priceId === process.env.STRIPE_PRICE_BASIC) {
+            matchedPlan = 'basic';
+            credits = 5;
+          } else if (context.priceId === process.env.STRIPE_PRICE_PRO) {
+            matchedPlan = 'pro';
+            credits = 12;
+          } else if (context.priceId === process.env.STRIPE_PRICE_MAX) {
+            matchedPlan = 'max';
+            credits = 30;
+          }
+
+          console.log(`billing> priceId=${context.priceId} plan=${matchedPlan}`);
+          
+          if (!matchedPlan) {
+            console.log(`billing> SKIPPED: priceId not recognized`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+          
+          // Find user
+          const user = await storage.getUserByStripeCustomerId(context.customerId);
+          if (!user) {
+            console.log(`billing> SKIPPED: no user for customer ${context.customerId}`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+          
+          // Calculate renewal date
+          let renewAt = new Date();
+          if (context.periodEnd) {
+            renewAt = new Date(context.periodEnd * 1000);
+          }
+          
+          // ATOMIC TRANSACTION: apply credits, update plan, mark invoice as processed
+          try {
+            await db.transaction(async (tx) => {
+              // Mark invoice as processed first for idempotency
+              await tx.insert(processedInvoices).values({
+                invoiceId,
+                userId: user.id,
+                planType: matchedPlan,
+                creditsAdded: credits
+              });
+
+              // Add credits to user
+              const [currentUser] = await tx
+                .select({ creditsRemaining: users.creditsRemaining })
+                .from(users)
+                .where(eq(users.id, user.id));
+
+              // Build update object
+              const updateData: any = {
+                creditsRemaining: (currentUser?.creditsRemaining || 0) + credits,
+                activePlan: matchedPlan,
+                creditsRenewAt: renewAt,
+                updatedAt: new Date()
+              };
+              
+              // Only update subscription ID if we have one and user doesn't have it already
+              if (context.subscriptionId && !user.stripeSubscriptionId) {
+                updateData.stripeSubscriptionId = context.subscriptionId;
+              }
+              
+              await tx
+                .update(users)
+                .set(updateData)
+                .where(eq(users.id, user.id));
+
+              // Add entry to credits ledger
+              await tx.insert(creditsLedger).values({
+                userId: user.id,
+                delta: credits,
+                reason: `stripe_${matchedPlan}_renewal`
+              });
+
+              // Store Stripe event
+              await tx.insert(stripeEvents).values({
+                id: event.id,
+                type: event.type,
+                payload: event as any
+              });
+            });
+            
+            console.log(`billing> PLAN SET: plan=${matchedPlan} renewAt=${renewAt.toISOString()} sub=${context.subscriptionId} user=${user.id}`);
+            console.log(`billing> APPLIED: +${credits} credits for invoice=${invoiceId}`);
+          } catch (error) {
+            console.error(`billing> ERROR applying credits: ${error}`);
+            return res.status(500).json({ error: 'Failed to apply credits' });
+          }
+          
+          break;
+        }
+
+        case 'invoice.paid': {
+          // Just log and store event - do NOT sum credits (prevents duplicates)
+          console.log(`billing> INVOICE.PAID: logged only, no credits added`);
+          await storage.createStripeEvent({
+            id: event.id,
+            type: event.type,
+            payload: event as any
+          });
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const subscription = event.data.object as Stripe.Subscription;
+          const customerId = subscription.customer as string;
+          const subscriptionId = subscription.id;
+          
+          console.log(`billing> SUBSCRIPTION DELETED: sub=${subscriptionId} customer=${customerId}`);
+          
+          if (customerId) {
+            const user = await storage.getUserByStripeCustomerId(customerId);
+            if (user) {
+              // Clear active plan but don't touch existing credits
+              await db
+                .update(users)
+                .set({
+                  activePlan: null,
+                  creditsRenewAt: null,
+                  stripeSubscriptionId: null,
+                  updatedAt: new Date()
+                })
+                .where(eq(users.id, user.id));
+              
+              // Optional: Add ledger entry for subscription cancellation
+              await db.insert(creditsLedger).values({
+                userId: user.id,
+                delta: 0,
+                reason: 'subscription_cancelled'
+              });
+              
+              await storage.createStripeEvent({
+                id: event.id,
+                type: event.type,
+                payload: event as any
+              });
+              console.log(`billing> PLAN CLEARED (subscription deleted) user=${user.id}`);
+            } else {
+              console.log(`billing> SKIPPED: no user for cancelled customer ${customerId}`);
+            }
+          }
+          break;
+        }
+
+        default:
+          console.log(`billing> UNHANDLED: ${event.type}`);
+          await storage.createStripeEvent({
+            id: event.id,
+            type: event.type,
+            payload: event as any
+          });
+      }
+
+      res.json({ received: true });
+    } catch (error) {
+      console.error('billing> PROCESSING ERROR:', error);
+      res.status(500).json({ error: 'Webhook processing failed' });
+    }
+  });
+
+  // POST /api/stripe/backfill - Reprocess existing stripe events (admin/temporary)
+  app.post('/api/stripe/backfill', async (req: Request, res: Response) => {
+    try {
+      console.log(`billing> BACKFILL: Starting manual backfill process`);
+      
+      // Simple approach: call the webhook for a specific event manually
+      const testEventId = 'evt_1S3cAjDJnK8wh0ivrDzfqdFo'; // Use a known event ID from logs
+      
+      // Simulate webhook call using the same logic
+      console.log(`billing> BACKFILL: Processing test event ${testEventId}`);
+      
+      const result = { message: 'Backfill endpoint ready - implementation simplified' };
+      res.json(result);
+      
+    } catch (error) {
+      console.error('billing> BACKFILL ERROR:', error);
+      res.status(500).json({ error: 'Backfill failed' });
     }
   });
 

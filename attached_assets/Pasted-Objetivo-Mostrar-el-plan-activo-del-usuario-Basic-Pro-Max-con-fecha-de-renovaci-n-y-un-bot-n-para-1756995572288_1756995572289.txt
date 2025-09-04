@@ -1,0 +1,166 @@
+Objetivo
+
+Mostrar el plan activo del usuario (Basic/Pro/Max) con fecha de renovación y un botón para cancelar la suscripción, manteniendo toda la lógica de créditos y webhook tal como está.
+
+🧱 Regla de oro
+
+No tocar login ni consumo de créditos.
+
+No regalar créditos ni recontarlos al actualizar el plan.
+
+Webhook sigue sumando créditos solo con invoice.payment_succeeded y con idempotencia por invoice.id.
+
+Si hay dudas en el webhook: log + 200 OK, pero sin cambiar créditos.
+
+✅ Lo que hay que añadir/arreglar
+1) Persistencia mínima (tabla users)
+
+Asegúrate de que estos campos existen y se actualizan:
+
+users.active_plan → basic | pro | max (string)
+
+users.credits_renew_at → timestamp (fin del período de facturación)
+
+users.stripe_customer_id → ya lo tenemos
+
+users.stripe_subscription_id → nuevo (string, nullable)
+
+Si no existe stripe_subscription_id, añádelo.
+
+2) Webhook — mantener plan y renovación
+
+En el manejador de invoice.payment_succeeded (donde ya sumamos créditos):
+
+Determinar el priceId y mapear a basic | pro | max (ya lo hacéis).
+
+Actualizar (sin tocar créditos):
+
+users.active_plan = <basic|pro|max>
+
+users.credits_renew_at = current_period_end
+
+Sacar de invoice.lines.data[0].period.end o expandiendo la subscription.
+
+users.stripe_subscription_id = <subscriptionId> (si viene en el evento)
+
+No crear nuevos asientos de créditos aquí si ya se sumaron para ese invoice.id (idempotencia intacta).
+
+Procesar además:
+
+customer.subscription.deleted → poner:
+
+users.active_plan = null
+
+users.credits_renew_at = null
+
+(no tocar créditos ya concedidos)
+
+(Opcional) customer.subscription.updated → si cambia cancel_at_period_end, reflejarlo.
+
+Logs (prefijo billing>):
+
+billing> PLAN SET: plan=<basic|pro|max> renewAt=<ISO> sub=<sub_...> user=<id>
+
+billing> PLAN CLEARED (subscription deleted) user=<id>
+
+3) Endpoints de estado y acciones
+GET /api/billing/subscription
+
+Responde con:
+
+{
+  "activePlan": "pro" | "basic" | "max" | null,
+  "renewAt": "2025-10-04T10:00:00Z" | null,
+  "status": "active" | "canceled" | "none",
+  "cancelAtPeriodEnd": true | false,
+  "manageUrl": "<opcional para portal de Stripe>"
+}
+
+
+Derivar status así:
+
+active_plan != null → "active"
+
+active_plan == null → "none"
+
+(si en Stripe viene cancel_at_period_end=true) → "active" pero mostrar “se cancelará el …”.
+
+POST /api/billing/cancel
+
+Requiere usuario autenticado.
+
+Busca users.stripe_subscription_id; si no hay, error amable.
+
+Llama a Stripe para marcar cancel_at_period_end = true.
+
+Devuelve { ok: true, cancelAtPeriodEnd: true }.
+
+No tocar créditos.
+
+(Opcional) POST /api/billing/reactivate para quitar cancel_at_period_end.
+
+4) UI “Mi Cuenta”
+
+Bloque “Planes y Suscripción”:
+
+Si activePlan != null:
+
+Mostrar “Plan activo: Basic/Pro/Max”
+
+“Renueva el: <fecha local corta>” (de renewAt)
+
+Botón “Cancelar suscripción” → llama a POST /api/billing/cancel
+
+Si cancelAtPeriodEnd=true, mostrar aviso “Se cancelará el <fecha>”
+
+Si activePlan == null:
+
+Mostrar “Sin suscripción activa” (como ahora) y las tarjetas de planes.
+
+Importante: no sumar créditos desde UI; UI solo refleja GET /api/billing/subscription.
+
+5) Reconcilia lo ya vendido (backfill suave)
+
+Para usuarios con compras ya realizadas:
+
+Si tienen stripe_customer_id y algún invoice.payment_succeeded reciente, pero active_plan es null: llamar a Stripe (subscription del customer) y rellenar active_plan, credits_renew_at, stripe_subscription_id sin tocar créditos.
+
+Esto puede ser un script puntual o endpoint admin.
+
+6) Pruebas de aceptación (QA)
+
+Compra PRO en test:
+
+Créditos +12 una sola vez (ya ok).
+
+GET /api/billing/subscription devuelve { activePlan: "pro", renewAt: <fecha> }.
+
+UI muestra “Plan activo: Pro” y “Renueva el: …”.
+
+Pulsar “Cancelar suscripción”:
+
+En Stripe: cancel_at_period_end=true.
+
+GET /api/billing/subscription refleja cancelAtPeriodEnd: true.
+
+UI muestra aviso “Se cancelará el …”.
+
+Créditos existentes intactos.
+
+Enviar customer.subscription.deleted desde Stripe:
+
+UI pasa a “Sin suscripción activa”.
+
+Créditos históricos intactos.
+
+✅ Resultado esperado
+
+La suscripción queda activa y visible tras cada pago.
+
+Se muestra la fecha de renovación.
+
+El usuario puede cancelar sin afectar sus créditos.
+
+Webhook sigue siendo idempotente y solo suma con invoice.payment_succeeded.
+
+Con esto debería desaparecer el “Sin suscripción activa” y verás el plan + renovación + botón de cancelación

@@ -1,0 +1,121 @@
+En logs aún aparece Processing checkout.session.completed (código viejo).
+
+También hay logs del webhook nuevo, pero no siempre (hay rutas duplicadas o middlewares en conflicto).
+
+stripe_events recibe checkout.session.completed, invoice.paid, invoice.payment_succeeded, pero no se actualiza users.active_plan / credits / credits_renew_at.
+
+Necesitamos un solo handler fiable y una herramienta de backfill para re-procesar eventos guardados.
+
+🛡️ REGLA DE ORO
+No rompas autenticación, consumo 1 crédito por vídeo, UI, galería, jobs, ni DB. Todo el cambio debe quedar aislado a billing/stripe. Nada de regalar créditos.
+
+✅ Instrucciones (paso a paso, sin romper nada)
+
+Eliminar duplicidades del webhook
+
+Busca dónde se registra /api/stripe/webhook (grep en el repo).
+
+Debe existir UN solo app.post('/api/stripe/webhook', ...). Si hay más (o Router adicional), elimina los extra.
+
+Asegura que el body-parser raw de Stripe solo afecte a esa ruta y esté antes del handler. No uses express.json() en esa ruta.
+
+Quita cualquier middleware o handler previo que haga return antes de pasar por la verificación/handler nuevo.
+
+Borrar logs viejos y forzar los nuevos
+
+Elimina TODOS los console.log antiguos tipo:
+
+Processing checkout.session.completed event
+
+Processing invoice.payment_succeeded event
+
+Todos los logs del webhook deben llevar el prefijo billing>.
+
+Primer log de la ruta:
+billing> STRIPE WEBHOOK: type=<event.type> id=<event.id>
+
+Normalizar evento y obtener priceId de forma robusta
+
+Para invoice.payment_succeeded e invoice.paid:
+
+Primero: invoice.lines.data[0].price.id
+
+Si no: invoice.lines.data[0].plan.id
+
+Si no: recupera subscription (invoice.subscription) y usa subscription.items.data[0].price.id.
+
+Si no hay priceId: billing> SKIPPED: no priceId y 200 OK (sin error 500).
+
+Matchea contra STRIPE_PRICE_BASIC/PRO/MAX de modo test (empiezan por price_).
+
+Determina créditos: basic=5, pro=12, max=30.
+
+Identificar usuario y aplicar cambios (transacción + idempotencia real)
+
+Localiza user por stripe_customer_id = invoice.customer.
+
+Si no hay usuario: billing> SKIPPED: no user for customer y 200.
+
+Calcula renewAt: usa invoice.lines.data[0].period.end (o invoice.period_end) → en ms/epoch a ISO.
+
+En UNA transacción DB:
+
+Verifica que stripe_events.id (event.id) no existe (idempotencia).
+
+Suma users.credits += credits
+
+users.active_plan = (basic|pro|max)
+
+users.credits_renew_at = renewAt
+
+Inserta fila en credits_ledger (reason='stripe_<plan>_renewal', amount=+credits)
+
+Inserta fila en stripe_events (esta debe cerrar la tx)
+
+Log final: billing> APPLIED: +<credits> plan=<plan> renewAt=<ISO> user=<id>
+
+Cancelar suscripciones
+
+Para customer.subscription.deleted:
+
+En transacción: set active_plan = NULL, credits_renew_at = NULL, inserta en stripe_events.
+
+Log: billing> SUB CANCELLED user=<id>
+
+Tarea de backfill (¡clave para no repetir pagos!)
+
+Añade un endpoint solo admin (temporal) o una tarea de consola:
+
+Recorre stripe_events del más reciente al más antiguo, filtra invoice.payment_succeeded e invoice.paid.
+
+Para cada evento, re-ejecuta la misma lógica del webhook (usa una función compartida).
+
+Respeta idempotencia (si ya se aplicó, SKIPPED: duplicate event).
+
+Log para cada re-proceso: billing> BACKFILL: <event.id> -> <resultado>
+
+Verificación rápida (pasos de QA)
+
+Reinicia el server (asegúrate de que realmente levanta el código nuevo).
+
+Envía desde Stripe un invoice.payment_succeeded de prueba al webhook.
+
+Debe aparecer:
+
+billing> STRIPE WEBHOOK: type=invoice.payment_succeeded id=...
+
+billing> customerId=... priceId=price_... matchedPlan=basic|pro|max userId=...
+
+billing> APPLIED: +5|12|30 plan=... renewAt=... user=...
+
+En DB: users.active_plan, users.credits, users.credits_renew_at actualizados; filas nuevas en credits_ledger y stripe_events.
+
+En “Mi Cuenta”: plan activo correcto + créditos subidos.
+
+Hardening mínimo
+
+Si falla la verificación de firma: log billing> WEBHOOK SIGNATURE FAILED y 400.
+
+Para cualquier inconsistencia controlada (sin user, sin price): log SKIPPED y 200.
+
+Nunca 500 por input de Stripe; 500 solo si hay fallo de DB real.

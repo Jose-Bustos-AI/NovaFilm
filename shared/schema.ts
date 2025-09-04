@@ -37,6 +37,9 @@ export const users = pgTable("users", {
   creditsRemaining: integer("credits_remaining").notNull().default(0),
   subscriptionStatus: text("subscription_status").default('inactive'), // 'inactive' | 'trialing' | 'active' | 'canceled'
   stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  activePlan: text("active_plan"), // 'basic' | 'pro' | 'max' | null
+  creditsRenewAt: timestamp("credits_renew_at"),
   canceledAt: timestamp("canceled_at"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -72,13 +75,30 @@ export const creditsLedger = pgTable("credits_ledger", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").references(() => users.id).notNull(),
   delta: integer("delta").notNull(), // +N for addition, -1 for consumption
-  reason: text("reason").notNull(), // 'video_generation' | 'manual_grant' | 'promo' | 'refund'
+  reason: text("reason").notNull(), // 'video_generation' | 'manual_grant' | 'promo' | 'refund' | 'subscription_payment'
   jobId: uuid("job_id").references(() => jobs.id),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   index("idx_credits_ledger_user_id").on(table.userId),
   index("idx_credits_ledger_created_at").on(table.createdAt),
 ]);
+
+// Stripe events for idempotency
+export const stripeEvents = pgTable("stripe_events", {
+  id: text("id").primaryKey(), // Stripe event id
+  type: text("type").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// Processed invoices for billing idempotency
+export const processedInvoices = pgTable("processed_invoices", {
+  invoiceId: text("invoice_id").primaryKey(), // Stripe invoice ID
+  userId: varchar("user_id").notNull().references(() => users.id),
+  planType: text("plan_type").notNull(), // 'basic', 'pro', 'max'
+  creditsAdded: integer("credits_added").notNull(),
+  processedAt: timestamp("processed_at").defaultNow().notNull(),
+});
 
 // Insert schemas
 export const insertJobSchema = createInsertSchema(jobs).omit({
@@ -94,6 +114,14 @@ export const insertVideoSchema = createInsertSchema(videos).omit({
 export const insertCreditsLedgerSchema = createInsertSchema(creditsLedger).omit({
   id: true,
   createdAt: true,
+});
+
+export const insertStripeEventSchema = createInsertSchema(stripeEvents).omit({
+  createdAt: true,
+});
+
+export const insertProcessedInvoiceSchema = createInsertSchema(processedInvoices).omit({
+  processedAt: true,
 });
 
 export const createJobSchema = z.object({
@@ -130,6 +158,11 @@ export const setPasswordSchema = z.object({
   newPassword: z.string().min(8, "La contraseña debe tener al menos 8 caracteres"),
 });
 
+// Billing schemas
+export const checkoutRequestSchema = z.object({
+  planKey: z.enum(["basic", "pro", "max"]),
+});
+
 // Types
 export type UpsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
@@ -140,8 +173,13 @@ export type Video = typeof videos.$inferSelect;
 export type CreateJobRequest = z.infer<typeof createJobSchema>;
 export type InsertCreditsLedger = z.infer<typeof insertCreditsLedgerSchema>;
 export type CreditsLedger = typeof creditsLedger.$inferSelect;
+export type InsertStripeEvent = z.infer<typeof insertStripeEventSchema>;
+export type StripeEvent = typeof stripeEvents.$inferSelect;
 export type UpdateUserProfile = z.infer<typeof updateUserProfileSchema>;
 export type RegisterRequest = z.infer<typeof registerSchema>;
 export type LoginRequest = z.infer<typeof loginSchema>;
 export type ChangePasswordRequest = z.infer<typeof changePasswordSchema>;
 export type SetPasswordRequest = z.infer<typeof setPasswordSchema>;
+export type CheckoutRequest = z.infer<typeof checkoutRequestSchema>;
+export type InsertProcessedInvoice = z.infer<typeof insertProcessedInvoiceSchema>;
+export type ProcessedInvoice = typeof processedInvoices.$inferSelect;

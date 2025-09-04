@@ -1,0 +1,108 @@
+Felicitación
+
+¡Buenísimo! Ya no da error al cancelar y la UI muestra el aviso. Vamos a cerrar el círculo verificando que Stripe tenga la cancelación programada y evitando cancelaciones repetidas.
+
+🧠 Contexto
+
+El botón “Cancelar Suscripción” ahora responde OK y muestra un toast.
+
+Pero puedes volver a pulsarlo indefinidamente → parece que no estamos leyendo/mostrando el estado de cancelación (cancel_at_period_end) y la API no lo bloquea.
+
+🛡️ Regla de oro
+
+No toques la lógica de créditos ni el alta de plan.
+
+Cancelación siempre al fin de período.
+
+Idempotencia: no debe permitir cancelar de nuevo si ya está programada.
+
+Mostrar el estado real que devuelve Stripe.
+
+✅ Instrucciones para Replit
+1) Verificar que Stripe ha programado la cancelación
+
+Comprobación manual inmediata (modo test):
+
+Stripe Dashboard → Customers → abre tu usuario → Subscriptions.
+Debe decir: Status: Active y un badge “Cancels at …” (o cancel_at_period_end=true). Esa fecha es la de fin de periodo.
+
+Stripe Dashboard → Developers → Logs: busca el POST /v1/subscriptions/{id} con cancel_at_period_end=true → 200 OK.
+
+Stripe Dashboard → Developers → Webhooks: verás un customer.subscription.updated (señal de cancelación programada).
+
+En la fecha de renovación, llegará customer.subscription.deleted.
+
+Si eso está, Stripe ya lo tiene programado ✅. Lo que falta es reflejarlo y bloquear reintentos.
+
+2) Endurecer /api/billing/cancel (idempotencia + retorno de estado)
+
+Antes de pedir la cancelación, leer la suscripción de Stripe (por subscription_id o listando por customer):
+
+Si cancel_at_period_end === true → no vuelvas a pedir cancelación.
+Devuelve 200 { scheduled: true, cancelAt: <timestamp> }.
+
+Si status no es active|trialing|past_due|unpaid → responde 409 { error: 'Subscription not cancelable' }.
+
+Si es cancelable:
+
+Ejecuta cancel_at_period_end=true.
+
+Devuelve: 200 { scheduled: true, cancelAt: <timestamp> }.
+
+Loggear siempre:
+billing> CANCEL: sub=sub_... alreadyScheduled=true/false cancelAt=...
+
+Bonus DB: opcionalmente guarda users.cancel_at (timestamp) para mostrarlo sin llamar a Stripe cada vez.
+
+3) Exponer el estado de la suscripción al frontend
+
+Añade/actualiza un endpoint ligero: GET /api/billing/status que devuelva:
+
+{
+  "activePlan": "pro",
+  "renewAt": "2025-10-04T00:00:00Z",
+  "subscriptionId": "sub_...",
+  "cancelAtPeriodEnd": true,
+  "cancelAt": "2025-10-04T00:00:00Z"
+}
+
+
+Si ya tienes un endpoint de /api/account, incluye ahí estos 3 campos: cancelAtPeriodEnd, cancelAt, subscriptionId.
+
+4) Ajuste de UI en “Mi Cuenta”
+
+Al montar la página, llamar a /api/billing/status:
+
+Si cancelAtPeriodEnd === true:
+
+Mostrar texto: “Cancelación programada para el {fecha}” (ya tienes el toast).
+
+Desactivar el botón “Cancelar Suscripción” (o esconderlo) y cambiarlo por un botón deshabilitado tipo “Cancelación programada”.
+
+Si cancelAtPeriodEnd === false: mantener el botón activo.
+
+Tras hacer POST /api/billing/cancel:
+
+Refrescar /api/billing/status y actualizar la UI con cancelAt.
+
+Evitar llamadas repetidas (botón deshabilitado).
+
+5) Pruebas rápidas
+
+Caso A: Suscripción activa → pulsas cancelar →
+
+En Stripe, cancel_at_period_end=true.
+
+/api/billing/status devuelve cancelAtPeriodEnd=true y cancelAt.
+
+El botón queda deshabilitado en la UI.
+
+Caso B: Pulsas de nuevo cancelar →
+
+Backend detecta que ya está cancel_at_period_end=true y responde 200 scheduled:true.
+
+UI no cambia (botón ya inhabilitado).
+
+Caso C: En la fecha de renovación, llega customer.subscription.deleted →
+
+Webhook vacía active_plan, credits_renew_at y stripe_subscription_id; la UI ya no muestra plan activo.

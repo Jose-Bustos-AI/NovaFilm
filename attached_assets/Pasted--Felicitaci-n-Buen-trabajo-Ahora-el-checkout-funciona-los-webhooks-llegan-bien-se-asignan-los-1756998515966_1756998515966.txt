@@ -1,0 +1,124 @@
+🎉 Felicitación
+
+¡Buen trabajo! Ahora el checkout funciona, los webhooks llegan bien, se asignan los créditos correctos y se muestra el plan activo con su fecha de renovación. Gran avance 👏
+
+🧠 Contexto (lo que pasa ahora)
+
+En Mi Cuenta se ve: Plan activo: Pro y Renueva el 4/10/2025.
+
+Los créditos se acreditan bien (ya no hay duplicados).
+
+Al pulsar Cancelar Suscripción aparece un error 400:
+
+Consola del navegador: POST /api/billing/cancel → 400 (Bad Request)
+
+Mensaje: {"error":"No active subscription found"}
+
+Conclusión: el backend no está localizando la suscripción de Stripe para cancelarla.
+
+🛡️ Regla de oro
+
+No rompas nada de lo que ya funciona:
+
+No tocar la lógica de créditos (ni duplicar).
+
+Mantener idempotencia del webhook y la tabla stripe_events.
+
+Mantener el estado “plan activo” y “renovación” correcto.
+
+Cancelación a fin de período (no borrar créditos existentes).
+
+No bloquear la generación de videos si el usuario aún tiene créditos.
+
+✅ Instrucciones (paso a paso)
+1) Persistir el subscription_id de Stripe en el usuario
+
+Añade en la tabla users el campo (si no existe): stripe_subscription_id TEXT NULL.
+
+En los webhooks, guarda siempre el subscription_id del usuario:
+
+checkout.session.completed: tomar session.subscription y guardarlo en users.stripe_subscription_id (junto con stripe_customer_id si aún no está).
+
+invoice.payment_succeeded: si llega invoice.subscription y el usuario no tiene stripe_subscription_id, guárdalo también.
+
+customer.subscription.deleted: vaciar stripe_subscription_id, vaciar active_plan y **credits_renew_at`.
+
+Nota: mantener idempotencia usando stripe_events para no reescribir estados dos veces.
+
+2) Arreglar el endpoint POST /api/billing/cancel
+
+Lógica:
+
+Buscar al usuario autenticado.
+
+Si users.stripe_subscription_id existe → usar ese id para cancelar.
+
+Si no existe, hacer fallback robusto:
+
+Listar suscripciones del stripe_customer_id con status IN ['active','trialing','past_due','unpaid'].
+
+Tomar la más reciente y usar su id.
+
+Llamar a Stripe para cancelar al final del período (cancel_at_period_end = true).
+
+No borres active_plan ni credits_renew_at aquí (siguen vigentes hasta el final). Ese borrado lo hace el webhook customer.subscription.deleted.
+
+Responder 200 { ok: true, cancelAtPeriodEnd: true }.
+
+Manejo de errores:
+
+Si no se encuentra suscripción en Stripe → 404 { error: 'No active subscription on Stripe' }
+
+Si el usuario no tiene stripe_customer_id → 400 { error: 'Missing stripe customer' }
+
+Logging:
+
+billing> CANCEL REQUEST: userId=..., customerId=..., subscriptionId=...
+
+billing> CANCEL RESULT: cancel_at_period_end=true, status=...
+
+3) Webhook de cancelación
+
+En customer.subscription.deleted:
+
+Poner users.active_plan = NULL
+
+users.credits_renew_at = NULL
+
+users.stripe_subscription_id = NULL
+
+Registrar evento en credits_ledger (opcional: “suscripción cancelada / fin de período”).
+
+4) UI de Mi Cuenta (mínimo cambio)
+
+Botón Cancelar Suscripción:
+
+Llama a POST /api/billing/cancel.
+
+Con 200: mostrar toast “Tu suscripción se cancelará al final del periodo. Podrás usar los créditos restantes hasta entonces.”
+
+No ocultar el plan activo aún (sigue vigente). Dejar el texto:
+
+Plan activo: Pro (cancelación al final del período) si el backend devuelve cancelAtPeriodEnd: true.
+
+Con 404 o 400: mostrar el mensaje del backend.
+
+5) Pruebas de aceptación
+
+Caso feliz: Usuario con Pro activo pulsa “Cancelar”. Respuesta 200. UI muestra el aviso y no borra el plan activo. En Stripe, la suscripción queda cancel_at_period_end = true.
+
+Webhook: simular customer.subscription.deleted. Tras llegar, en DB: active_plan=NULL, credits_renew_at=NULL, stripe_subscription_id=NULL; en UI ya no hay plan activo.
+
+Fallback: Quitar manualmente stripe_subscription_id en DB y volver a cancelar; el backend debe encontrar la suscripción listando por stripe_customer_id.
+
+Seguridad: Usuario sin stripe_customer_id recibe 400 y mensaje claro.
+
+No duplicación: Reenviar eventos desde Stripe → sin cambios ni duplicados en créditos o estado.
+
+6) Observabilidad
+
+Prefijo de logs consistente: billing> ...
+
+Añadir log al entrar en /api/billing/cancel y tras la respuesta de Stripe.
+
+Mantener trazabilidad en stripe_events.

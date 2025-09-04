@@ -1,0 +1,141 @@
+¡Buen avance!
+Ya vemos créditos sumándose desde Stripe, pero quedan dos problemas:
+
+Se están duplicando (te dio +10 al comprar Basic)
+
+En “Mi Cuenta” aún sale “Sin suscripción activa”
+
+🧠 Contexto
+
+En Stripe vemos eventos: checkout.session.completed, invoice.payment_succeeded y también invoice.paid.
+
+En DB ya guardas stripe_events.
+
+Los créditos se añaden, pero parece que estás contando dos veces la misma factura (ej. contando invoice.payment_succeeded y invoice.paid para el mismo invoice).
+
+El campo users.active_plan no se está actualizando tras un pago exitoso, por eso la UI muestra “Sin suscripción activa”.
+
+🛡️ Regla de oro (muy importante)
+
+No toques login, consumo de créditos por vídeo ni el resto de la app.
+
+Cambios solo en billing/Stripe (webhook + backfill + UI del plan).
+
+Idempotencia estricta: una factura de Stripe nunca puede sumar créditos más de una vez.
+
+Ante dudas/duplicados, responder 200 a Stripe pero no sumar créditos.
+
+✅ Instrucciones para Replit (haz exactamente esto)
+1) Filtra eventos: solo sumar créditos con invoice.payment_succeeded
+
+No sumes créditos en invoice.paid.
+
+checkout.session.completed solo sirve para vincular el stripe_customer_id y redirigir; no suma créditos.
+
+En el webhook de Stripe (Dashboard), deja activos solo:
+
+checkout.session.completed
+
+invoice.payment_succeeded
+
+(opcional) customer.subscription.deleted para desactivar plan
+
+Si invoice.paid sigue llegando, ignóralo en el código (log y 200 OK).
+
+2) Idempotencia por invoice.id (no por event.id)
+
+Muchas veces Stripe envía varios eventos para la misma factura.
+
+Antes de sumar, comprueba si ese invoice.id ya fue aplicado.
+
+Implementa una protección fuerte:
+
+Crea un registro/tabla processed_invoices (PK: invoice_id) o añade un unique index en credits_ledger(meta->>'invoice_id').
+
+Si ya existe ese invoice_id, log billing> SKIPPED duplicate invoice=<id> y no sumes.
+
+Todo en una transacción: registrar processed_invoices, sumar créditos, setear plan y credits_renew_at, insertar en credits_ledger, guardar stripe_events.
+
+3) Activar y mostrar plan activo
+
+En invoice.payment_succeeded, además de sumar créditos:
+
+Determina el priceId (con expand si hace falta).
+
+Normaliza a basic | pro | max comparando con STRIPE_PRICE_BASIC/PRO/MAX.
+
+Actualiza:
+
+users.active_plan = basic|pro|max
+
+users.credits_renew_at = current_period_end (de invoice.lines.data[0].period.end o subscription.current_period_end)
+
+En la UI de “Mi Cuenta”:
+
+Si users.active_plan != null → mostrar “Plan activo: Basic/Pro/Max” y “Renueva el: …”
+
+Si es null → “Sin suscripción activa”.
+
+4) Limpieza y backfill (arreglar lo ya duplicado)
+
+Crea una tarea/endpoint one-off para:
+
+Detectar duplicados del mismo invoice_id en credits_ledger (o en tu nueva tabla de idempotencia).
+
+Dejar solo uno; el resto revertirlos (insertar un movimiento de corrección -X en credits_ledger o recalcular saldo).
+
+Recalcular users.credits como SUM(credits_ledger.amount) para ese usuario.
+
+Crea un backfill: re-procesa únicamente eventos invoice.payment_succeeded no presentes en processed_invoices (o sin invoice_id aplicado), usando la misma lógica, para dejar todo consistente.
+
+5) Reglas de negocio extra (evitar falsos positivos)
+
+Solo sumar cuando invoice.billing_reason ∈ {subscription_create, subscription_cycle} y amount_paid > 0.
+
+Ignorar prorrateos/facturas cero (si lines.data[*].proration = true o amount_paid = 0).
+
+En upgrades/downgrades, el siguiente payment_succeeded actualizará el plan y añadirá los créditos del nuevo plan.
+
+6) Logs de diagnóstico (prefijo billing>)
+
+billing> WEBHOOK: type=<type> evt=<id>
+
+billing> INVOICE: id=<invoice.id> amount_paid=<amount> reason=<billing_reason>
+
+billing> priceId=<priceId> plan=<plan>
+
+billing> APPLIED: +<credits> plan=<plan> renewAt=<ISO> user=<id> invoice=<id>
+
+billing> SKIPPED duplicate invoice=<id>
+
+7) Pruebas de verificación (QA)
+
+Enviar evento de prueba invoice.payment_succeeded desde Stripe:
+
+Debe crear un apunte en credits_ledger con invoice_id, no duplicarse.
+
+Debe actualizar active_plan y credits_renew_at.
+
+Hacer un checkout real de Basic:
+
+Debe sumar +5 solo una vez.
+
+“Mi Cuenta” debe mostrar “Plan activo: Basic” y “Renueva el: …”.
+
+Reintentar el webhook del mismo invoice:
+
+Debe salir SKIPPED duplicate invoice=... y no alterar créditos.
+
+🧾 Resumen corto para que lo arreglen rápido
+
+✅ Solo sumar en invoice.payment_succeeded. Ignorar invoice.paid.
+
+✅ Idempotencia por invoice.id (unique) — nunca por event.id.
+
+✅ En ese mismo punto, setear active_plan y credits_renew_at.
+
+✅ UI: mostrar plan activo si users.active_plan tiene valor.
+
+✅ Backfill y limpieza: revertir duplicados existentes y dejar créditos coherentes.
+
+Con esto se corrigen ambos problemas: (1) no más duplicados y (2) el plan aparece activo tras el pago.
