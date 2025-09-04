@@ -1299,6 +1299,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // POST /api/stripe/webhook - Handle Stripe webhooks
   app.post('/api/stripe/webhook', async (req: Request, res: Response) => {
+    console.log(`🔔 Webhook received: ${req.headers['stripe-signature'] ? 'with signature' : 'NO SIGNATURE'}`);
+    
     const sig = req.headers['stripe-signature'];
     const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 
@@ -1307,8 +1309,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       // Verify webhook signature
       event = stripe.webhooks.constructEvent(req.body, sig as string, endpointSecret);
+      console.log(`✅ Webhook signature verified. Event type: ${event.type}, ID: ${event.id}`);
     } catch (err) {
-      console.error(`Webhook signature verification failed:`, err);
+      console.error(`❌ Webhook signature verification failed:`, err);
       return res.status(400).send(`Webhook Error: ${err}`);
     }
 
@@ -1330,66 +1333,100 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Handle different event types
       switch (event.type) {
         case 'checkout.session.completed': {
+          console.log(`🛒 Processing checkout.session.completed event`);
           const session = event.data.object as Stripe.Checkout.Session;
           const customerId = session.customer as string;
+          const userId = session.metadata?.userId;
           
-          if (customerId) {
-            // Find user by customer ID and save Stripe customer ID
-            const user = await storage.getUserByStripeCustomerId(customerId);
-            if (!user) {
-              // Try to find by metadata
-              const userId = session.metadata?.userId;
-              if (userId) {
-                await storage.updateUserStripeInfo(userId, customerId);
+          console.log(`Customer ID: ${customerId}, User ID from metadata: ${userId}`);
+          
+          if (customerId && userId) {
+            // Save Stripe customer ID to user record
+            await storage.updateUserStripeInfo(userId, customerId);
+            console.log(`💾 Updated user ${userId} with Stripe customer ID ${customerId}`);
+            
+            // Also update plan from the subscription if it exists
+            if (session.subscription) {
+              try {
+                const subscription = await stripe.subscriptions.retrieve(session.subscription as string);
+                const priceId = subscription.items.data[0]?.price.id;
+                
+                if (priceId) {
+                  // Map price ID to plan
+                  for (const [key, plan] of Object.entries(BILLING_PLANS)) {
+                    if (plan.priceId === priceId) {
+                      const renewDate = new Date((subscription as any).current_period_end * 1000);
+                      await storage.updateUserStripeInfo(userId, customerId, key, renewDate);
+                      console.log(`📋 Set user ${userId} to plan ${key}, renews ${renewDate}`);
+                      break;
+                    }
+                  }
+                }
+              } catch (error) {
+                console.error(`Error updating plan from checkout session:`, error);
               }
             }
+          } else {
+            console.log(`⚠️ Missing customer ID or user ID in session metadata`);
           }
           break;
         }
 
         case 'invoice.payment_succeeded': {
+          console.log(`💰 Processing invoice.payment_succeeded event`);
           const invoice = event.data.object as Stripe.Invoice;
           const customerId = invoice.customer as string;
-          const subscriptionId = (invoice as any).subscription;
+          const subscriptionId = (invoice as any).subscription as string;
+          
+          console.log(`Customer ID: ${customerId}, Subscription ID: ${subscriptionId}`);
           
           if (subscriptionId && customerId) {
-            // Get subscription to find the price ID
-            const subscription = await stripe.subscriptions.retrieve(subscriptionId as string);
-            const priceId = subscription.items.data[0]?.price.id;
-            
-            if (priceId) {
-              // Map price ID to plan and credits
-              let planKey: string | null = null;
-              let credits = 0;
+            try {
+              // Get subscription to find the price ID
+              const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+              const priceId = subscription.items.data[0]?.price.id;
               
-              for (const [key, plan] of Object.entries(BILLING_PLANS)) {
-                if (plan.priceId === priceId) {
-                  planKey = key;
-                  credits = plan.credits;
-                  break;
+              console.log(`Price ID from subscription: ${priceId}`);
+              
+              if (priceId) {
+                // Map price ID to plan and credits
+                let planKey: string | null = null;
+                let credits = 0;
+                
+                for (const [key, plan] of Object.entries(BILLING_PLANS)) {
+                  if (plan.priceId === priceId) {
+                    planKey = key;
+                    credits = plan.credits;
+                    break;
+                  }
                 }
-              }
-              
-              if (planKey && credits > 0) {
-                // Find user by customer ID
-                const user = await storage.getUserByStripeCustomerId(customerId);
-                if (user) {
-                  // Add credits and update plan
-                  await storage.addSubscriptionCredits(user.id, credits, planKey);
-                  const subscriptionData = subscription as any;
-                  await storage.updateUserStripeInfo(
-                    user.id, 
-                    customerId, 
-                    planKey,
-                    subscriptionData.current_period_end ? new Date(subscriptionData.current_period_end * 1000) : undefined
-                  );
-                  
-                  console.log(`Added ${credits} credits for plan ${planKey} to user ${user.id}`);
+                
+                console.log(`Mapped to plan: ${planKey}, credits: ${credits}`);
+                
+                if (planKey && credits > 0) {
+                  // Find user by customer ID
+                  const user = await storage.getUserByStripeCustomerId(customerId);
+                  if (user) {
+                    // Add credits and update plan
+                    await storage.addSubscriptionCredits(user.id, credits, planKey);
+                    const renewDate = new Date((subscription as any).current_period_end * 1000);
+                    await storage.updateUserStripeInfo(user.id, customerId, planKey, renewDate);
+                    
+                    console.log(`💳 Added ${credits} credits for plan ${planKey} to user ${user.id}`);
+                  } else {
+                    console.error(`❌ User not found for Stripe customer ${customerId}`);
+                  }
                 } else {
-                  console.error(`User not found for Stripe customer ${customerId}`);
+                  console.log(`⚠️ No valid plan/credits mapping found for price ${priceId}`);
                 }
+              } else {
+                console.log(`⚠️ No price ID found in subscription`);
               }
+            } catch (error) {
+              console.error(`Error processing invoice payment:`, error);
             }
+          } else {
+            console.log(`⚠️ Missing subscription ID or customer ID`);
           }
           break;
         }
