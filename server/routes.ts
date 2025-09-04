@@ -82,7 +82,11 @@ async function startPolling(taskId: string) {
         await storage.updateJobStatus(taskId, 'READY', undefined);
         
         // Generate thumbnail for the video (async, don't block response)
+        console.log(`[POLLING] About to call processVideoThumbnail for ${taskId} with URL: ${videoUrl}`);
         thumbnailService.processVideoThumbnail(taskId, videoUrl)
+          .then(() => {
+            console.log(`[POLLING] Thumbnail processing completed for ${taskId}`);
+          })
           .catch(error => {
             console.error(`[THUMBNAIL] Failed to process thumbnail for ${taskId}:`, error);
           });
@@ -513,31 +517,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Fix thumbnail for specific video (development only)
-  app.post('/api/debug/fix-thumbnail/:taskId', async (req: Request, res: Response) => {
+  // Fix thumbnails for all videos without thumbnails (development only)
+  app.post('/api/debug/fix-all-thumbnails', async (req: Request, res: Response) => {
     try {
       // Only available in development
       if (process.env.NODE_ENV !== 'development') {
         return res.status(404).json({ message: 'Not found' });
       }
       
-      const taskId = req.params.taskId;
-      const video = await storage.getVideoByTaskId(taskId);
+      console.log('[DEBUG] Starting manual thumbnail backfill...');
       
-      if (!video || !video.providerVideoUrl) {
-        return res.status(404).json({ error: 'Video not found or no video URL' });
-      }
-      
-      // Generate thumbnail manually
-      thumbnailService.processVideoThumbnail(taskId, video.providerVideoUrl)
+      // Run the backfill process
+      thumbnailService.backfillThumbnails()
+        .then(() => {
+          console.log('[DEBUG] Manual thumbnail backfill completed');
+        })
         .catch(error => {
-          console.error(`[THUMBNAIL] Failed to process thumbnail for ${taskId}:`, error);
+          console.error('[DEBUG] Manual thumbnail backfill failed:', error);
         });
       
-      res.json({ message: `Thumbnail generation started for ${taskId}` });
+      res.json({ message: 'Thumbnail backfill started - check server logs for progress' });
     } catch (error) {
-      console.error('Fix thumbnail error:', error);
-      res.status(500).json({ error: 'Failed to start thumbnail generation' });
+      console.error('Debug backfill error:', error);
+      res.status(500).json({ error: 'Failed to start thumbnail backfill' });
     }
   });
 

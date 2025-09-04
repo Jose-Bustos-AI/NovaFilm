@@ -164,13 +164,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getVideosWithoutThumbnails(): Promise<Video[]> {
-    return await db
+    console.log('[STORAGE] Querying videos without thumbnails...');
+    const result = await db
       .select()
       .from(videos)
       .where(and(
         isNull(videos.thumbnail)
       ))
       .orderBy(desc(videos.createdAt));
+    console.log(`[STORAGE] Found ${result.length} videos without thumbnails:`, result.map(v => ({ taskId: v.taskId, thumbnail: v.thumbnail })));
+    return result;
   }
 
   // Credit operations
