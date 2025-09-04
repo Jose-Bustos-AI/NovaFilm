@@ -148,13 +148,21 @@ export function AccountPage() {
   // Cancel subscription mutation
   const cancelSubscriptionMutation = useMutation({
     mutationFn: () => apiRequest('POST', '/api/billing/cancel', {}),
-    onSuccess: () => {
+    onSuccess: (response: any) => {
       queryClient.invalidateQueries({ queryKey: ['/api/billing/subscription'] });
       queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
-      toast({
-        title: "Suscripción cancelada",
-        description: "Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos."
-      });
+      
+      if (response.scheduled) {
+        toast({
+          title: "Suscripción cancelada",
+          description: "Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos."
+        });
+      } else {
+        toast({
+          title: "Cancelación programada",
+          description: "Tu suscripción ya estaba programada para cancelarse."
+        });
+      }
     },
     onError: (error: any) => {
       toast({

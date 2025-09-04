@@ -1260,9 +1260,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           try {
             const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
             cancelAtPeriodEnd = subscription.cancel_at_period_end || false;
-            if (cancelAtPeriodEnd) {
-              status = 'canceled';
-            }
+            // Keep status as 'active' even if cancel_at_period_end=true
+            // The UI will use cancelAtPeriodEnd flag to show appropriate message
           } catch (error) {
             console.log(`billing> Could not check subscription status: ${error}`);
           }
@@ -1281,7 +1280,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // POST /api/billing/cancel - Cancel subscription
+  // POST /api/billing/cancel - Cancel subscription (idempotent)
   app.post('/api/billing/cancel', isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = getUserId(req);
@@ -1344,17 +1343,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
       
+      // IDEMPOTENCY: First retrieve current subscription status
+      const currentSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+      
+      // Check if already scheduled for cancellation
+      if (currentSubscription.cancel_at_period_end) {
+        const cancelAt = currentSubscription.current_period_end ? new Date((currentSubscription as any).current_period_end * 1000).toISOString() : null;
+        console.log(`billing> CANCEL: sub=${subscriptionId} alreadyScheduled=true cancelAt=${cancelAt}`);
+        return res.json({ 
+          ok: true, 
+          scheduled: true,
+          cancelAtPeriodEnd: true,
+          cancelAt: cancelAt
+        });
+      }
+      
+      // Check if subscription is cancelable
+      if (!['active', 'trialing', 'past_due', 'unpaid'].includes(currentSubscription.status)) {
+        console.log(`billing> ERROR: Subscription ${subscriptionId} not cancelable, status=${currentSubscription.status}`);
+        return res.status(409).json({ error: 'Subscription not cancelable' });
+      }
+      
       // Cancel subscription at period end in Stripe
       const subscription = await stripe.subscriptions.update(subscriptionId, {
         cancel_at_period_end: true
       });
       
-      console.log(`billing> CANCEL RESULT: cancel_at_period_end=true, status=${subscription.status}, sub=${subscriptionId}`);
+      const cancelAt = subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null;
+      console.log(`billing> CANCEL: sub=${subscriptionId} alreadyScheduled=false cancelAt=${cancelAt}`);
       
       res.json({ 
         ok: true, 
+        scheduled: true,
         cancelAtPeriodEnd: true,
-        renewAt: subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null
+        cancelAt: cancelAt
       });
     } catch (error) {
       console.error(`billing> ERROR canceling subscription: ${error}`);
