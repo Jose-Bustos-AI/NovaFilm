@@ -73,12 +73,19 @@ async function startPolling(taskId: string) {
       
       if (hasSuccessFlag && hasResultUrls) {
         // Success - update video and job status
+        const videoUrl = recordInfo.data.response.resultUrls[0];
         await storage.updateVideo(taskId, {
-          providerVideoUrl: recordInfo.data.response.resultUrls[0],
+          providerVideoUrl: videoUrl,
           resolution: recordInfo.data.response.resolution || "720p",
           fallbackFlag: recordInfo.data.fallbackFlag || false,
         });
         await storage.updateJobStatus(taskId, 'READY', undefined);
+        
+        // Generate thumbnail for the video (async, don't block response)
+        thumbnailService.processVideoThumbnail(taskId, videoUrl)
+          .catch(error => {
+            console.error(`[THUMBNAIL] Failed to process thumbnail for ${taskId}:`, error);
+          });
         
         console.log(JSON.stringify({
           stage: "poll",
@@ -503,6 +510,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
         error: 'Failed to fetch status',
         message: (error as Error).message 
       });
+    }
+  });
+
+  // Fix thumbnail for specific video (development only)
+  app.post('/api/debug/fix-thumbnail/:taskId', async (req: Request, res: Response) => {
+    try {
+      // Only available in development
+      if (process.env.NODE_ENV !== 'development') {
+        return res.status(404).json({ message: 'Not found' });
+      }
+      
+      const taskId = req.params.taskId;
+      const video = await storage.getVideoByTaskId(taskId);
+      
+      if (!video || !video.providerVideoUrl) {
+        return res.status(404).json({ error: 'Video not found or no video URL' });
+      }
+      
+      // Generate thumbnail manually
+      thumbnailService.processVideoThumbnail(taskId, video.providerVideoUrl)
+        .catch(error => {
+          console.error(`[THUMBNAIL] Failed to process thumbnail for ${taskId}:`, error);
+        });
+      
+      res.json({ message: `Thumbnail generation started for ${taskId}` });
+    } catch (error) {
+      console.error('Fix thumbnail error:', error);
+      res.status(500).json({ error: 'Failed to start thumbnail generation' });
     }
   });
 
