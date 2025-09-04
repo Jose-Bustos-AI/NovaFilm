@@ -90,6 +90,15 @@ export const stripeEvents = pgTable("stripe_events", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Processed invoices for billing idempotency
+export const processedInvoices = pgTable("processed_invoices", {
+  invoiceId: text("invoice_id").primaryKey(), // Stripe invoice ID
+  userId: varchar("user_id").notNull().references(() => users.id),
+  planType: text("plan_type").notNull(), // 'basic', 'pro', 'max'
+  creditsAdded: integer("credits_added").notNull(),
+  processedAt: timestamp("processed_at").defaultNow().notNull(),
+});
+
 // Insert schemas
 export const insertJobSchema = createInsertSchema(jobs).omit({
   id: true,
@@ -108,6 +117,10 @@ export const insertCreditsLedgerSchema = createInsertSchema(creditsLedger).omit(
 
 export const insertStripeEventSchema = createInsertSchema(stripeEvents).omit({
   createdAt: true,
+});
+
+export const insertProcessedInvoiceSchema = createInsertSchema(processedInvoices).omit({
+  processedAt: true,
 });
 
 export const createJobSchema = z.object({
@@ -167,3 +180,5 @@ export type LoginRequest = z.infer<typeof loginSchema>;
 export type ChangePasswordRequest = z.infer<typeof changePasswordSchema>;
 export type SetPasswordRequest = z.infer<typeof setPasswordSchema>;
 export type CheckoutRequest = z.infer<typeof checkoutRequestSchema>;
+export type InsertProcessedInvoice = z.infer<typeof insertProcessedInvoiceSchema>;
+export type ProcessedInvoice = typeof processedInvoices.$inferSelect;

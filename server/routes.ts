@@ -5,7 +5,7 @@ import { setupLocalAuth, isAuthenticated, getUserId } from "./localAuth";
 import { refinePrompt, generateChatResponse, getChatModel, type ChatResponse } from "./services/openai";
 import { kieService } from "./services/kie";
 import { thumbnailService } from "./services/thumbnail";
-import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema, checkoutRequestSchema } from "@shared/schema";
+import { createJobSchema, users, jobs, videos, updateUserProfileSchema, registerSchema, loginSchema, changePasswordSchema, setPasswordSchema, checkoutRequestSchema, creditsLedger, stripeEvents, processedInvoices } from "@shared/schema";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { sql, desc, eq } from "drizzle-orm";
@@ -1431,6 +1431,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           
           if (context.customerId && userId) {
             await storage.updateUserStripeInfo(userId, context.customerId);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
             console.log(`billing> CHECKOUT: linked customer ${context.customerId} to user ${userId}`);
           } else {
             console.log(`billing> SKIPPED: missing customer or user data`);
@@ -1438,15 +1443,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           break;
         }
 
-        case 'invoice.payment_succeeded':
-        case 'invoice.paid': {
-          if (!context.customerId) {
-            console.log(`billing> SKIPPED: no customer ID`);
-            break;
-          }
-
-          if (!context.priceId) {
-            console.log(`billing> SKIPPED: no priceId after expands`);
+        case 'invoice.payment_succeeded': {
+          const invoice = event.data.object as Stripe.Invoice;
+          const invoiceId = invoice.id;
+          const billingReason = invoice.billing_reason;
+          const amountPaid = invoice.amount_paid;
+          
+          console.log(`billing> INVOICE: id=${invoiceId} amount_paid=${amountPaid} reason=${billingReason}`);
+          
+          // Only process subscription payments with amount > 0
+          if (!['subscription_create', 'subscription_cycle'].includes(billingReason || '') || amountPaid <= 0) {
+            console.log(`billing> SKIPPED: not a subscription payment or zero amount`);
             await storage.createStripeEvent({
               id: event.id,
               type: event.type,
@@ -1455,7 +1462,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return res.json({ received: true });
           }
 
-          // Match against env vars
+          // Check invoice idempotency - CRITICAL to prevent duplicates
+          const existingInvoice = await storage.getProcessedInvoice(invoiceId);
+          if (existingInvoice) {
+            console.log(`billing> SKIPPED duplicate invoice=${invoiceId}`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+
+          if (!context.customerId || !context.priceId) {
+            console.log(`billing> SKIPPED: no customer or priceId after expands`);
+            await storage.createStripeEvent({
+              id: event.id,
+              type: event.type,
+              payload: event as any
+            });
+            return res.json({ received: true });
+          }
+
+          // Match priceId to plan
           let matchedPlan: string | null = null;
           let credits = 0;
           
@@ -1469,6 +1498,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             matchedPlan = 'max';
             credits = 30;
           }
+
+          console.log(`billing> priceId=${context.priceId} plan=${matchedPlan}`);
           
           if (!matchedPlan) {
             console.log(`billing> SKIPPED: priceId not recognized`);
@@ -1498,24 +1529,65 @@ export async function registerRoutes(app: Express): Promise<Server> {
             renewAt = new Date(context.periodEnd * 1000);
           }
           
-          // Apply credits and plan (atomic)
+          // ATOMIC TRANSACTION: apply credits, update plan, mark invoice as processed
           try {
-            await storage.addSubscriptionCredits(user.id, credits, `stripe_${matchedPlan}_renewal`);
-            await storage.updateUserStripeInfo(user.id, context.customerId, matchedPlan, renewAt);
-            
-            // Store event for idempotency after successful processing
-            await storage.createStripeEvent({
-              id: event.id,
-              type: event.type,
-              payload: event as any
+            await db.transaction(async (tx) => {
+              // Mark invoice as processed first for idempotency
+              await tx.insert(processedInvoices).values({
+                invoiceId,
+                userId: user.id,
+                planType: matchedPlan,
+                creditsAdded: credits
+              });
+
+              // Add credits to user
+              const [currentUser] = await tx
+                .select({ creditsRemaining: users.creditsRemaining })
+                .from(users)
+                .where(eq(users.id, user.id));
+
+              await tx
+                .update(users)
+                .set({ 
+                  creditsRemaining: (currentUser?.creditsRemaining || 0) + credits,
+                  activePlan: matchedPlan,
+                  creditsRenewAt: renewAt,
+                  updatedAt: new Date()
+                })
+                .where(eq(users.id, user.id));
+
+              // Add entry to credits ledger
+              await tx.insert(creditsLedger).values({
+                userId: user.id,
+                delta: credits,
+                reason: `stripe_${matchedPlan}_renewal`
+              });
+
+              // Store Stripe event
+              await tx.insert(stripeEvents).values({
+                id: event.id,
+                type: event.type,
+                payload: event as any
+              });
             });
             
-            console.log(`billing> APPLIED: +${credits} plan=${matchedPlan} renewAt=${renewAt.toISOString()} user=${user.id} priceId=${context.priceId}`);
+            console.log(`billing> APPLIED: +${credits} plan=${matchedPlan} renewAt=${renewAt.toISOString()} user=${user.id} invoice=${invoiceId}`);
           } catch (error) {
             console.error(`billing> ERROR applying credits: ${error}`);
             return res.status(500).json({ error: 'Failed to apply credits' });
           }
           
+          break;
+        }
+
+        case 'invoice.paid': {
+          // Just log and store event - do NOT sum credits (prevents duplicates)
+          console.log(`billing> INVOICE.PAID: logged only, no credits added`);
+          await storage.createStripeEvent({
+            id: event.id,
+            type: event.type,
+            payload: event as any
+          });
           break;
         }
 

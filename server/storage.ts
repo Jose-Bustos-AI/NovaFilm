@@ -4,6 +4,7 @@ import {
   videos,
   creditsLedger,
   stripeEvents,
+  processedInvoices,
   type User,
   type UpsertUser,
   type Job,
@@ -15,6 +16,8 @@ import {
   type UpdateUserProfile,
   type InsertStripeEvent,
   type StripeEvent,
+  type InsertProcessedInvoice,
+  type ProcessedInvoice,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, desc, and, isNull } from "drizzle-orm";
@@ -56,6 +59,8 @@ export interface IStorage {
   addSubscriptionCredits(userId: string, credits: number, planKey: string): Promise<void>;
   createStripeEvent(event: InsertStripeEvent): Promise<StripeEvent>;
   getStripeEvent(eventId: string): Promise<StripeEvent | undefined>;
+  createProcessedInvoice(processedInvoice: InsertProcessedInvoice): Promise<ProcessedInvoice>;
+  getProcessedInvoice(invoiceId: string): Promise<ProcessedInvoice | undefined>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -275,6 +280,16 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(stripeEvents)
       .orderBy(desc(stripeEvents.createdAt));
+  }
+
+  async createProcessedInvoice(processedInvoice: InsertProcessedInvoice): Promise<ProcessedInvoice> {
+    const [newProcessedInvoice] = await db.insert(processedInvoices).values(processedInvoice).returning();
+    return newProcessedInvoice;
+  }
+
+  async getProcessedInvoice(invoiceId: string): Promise<ProcessedInvoice | undefined> {
+    const [processedInvoice] = await db.select().from(processedInvoices).where(eq(processedInvoices.invoiceId, invoiceId));
+    return processedInvoice;
   }
 
   async updateUserProfile(userId: string, updates: UpdateUserProfile): Promise<User> {
