@@ -1285,33 +1285,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/billing/cancel', isAuthenticated, async (req: Request, res: Response) => {
     try {
       const userId = getUserId(req);
+      console.log(`billing> CANCEL REQUEST: userId=${userId}`);
       
       const [user] = await db
         .select({
+          stripeCustomerId: users.stripeCustomerId,
           stripeSubscriptionId: users.stripeSubscriptionId,
           activePlan: users.activePlan
         })
         .from(users)
         .where(eq(users.id, userId));
       
-      if (!user || !user.stripeSubscriptionId) {
-        return res.status(400).json({ error: 'No active subscription found' });
+      if (!user || !user.stripeCustomerId) {
+        console.log(`billing> ERROR: Missing stripe customer for user ${userId}`);
+        return res.status(400).json({ error: 'Missing stripe customer' });
+      }
+      
+      console.log(`billing> CANCEL REQUEST: customerId=${user.stripeCustomerId}, subscriptionId=${user.stripeSubscriptionId}`);
+      
+      let subscriptionId = user.stripeSubscriptionId;
+      
+      // Fallback: if no subscription ID stored, find it via customer
+      if (!subscriptionId) {
+        console.log(`billing> No subscriptionId stored, searching by customer...`);
+        try {
+          const subscriptions = await stripe.subscriptions.list({
+            customer: user.stripeCustomerId,
+            status: 'active',
+            limit: 1
+          });
+          
+          if (subscriptions.data.length === 0) {
+            // Try other statuses
+            const allSubs = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'all',
+              limit: 10
+            });
+            
+            const activeSub = allSubs.data.find(sub => 
+              ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+            );
+            
+            if (!activeSub) {
+              console.log(`billing> ERROR: No active subscription found for customer ${user.stripeCustomerId}`);
+              return res.status(404).json({ error: 'No active subscription on Stripe' });
+            }
+            
+            subscriptionId = activeSub.id;
+          } else {
+            subscriptionId = subscriptions.data[0].id;
+          }
+          
+          console.log(`billing> FALLBACK: Found subscription ${subscriptionId}`);
+        } catch (error) {
+          console.error(`billing> ERROR finding subscription: ${error}`);
+          return res.status(404).json({ error: 'No active subscription on Stripe' });
+        }
       }
       
       // Cancel subscription at period end in Stripe
-      const subscription = await stripe.subscriptions.update(user.stripeSubscriptionId, {
+      const subscription = await stripe.subscriptions.update(subscriptionId, {
         cancel_at_period_end: true
       });
       
-      console.log(`billing> SUBSCRIPTION CANCELLED AT PERIOD END: sub=${user.stripeSubscriptionId} user=${userId}`);
+      console.log(`billing> CANCEL RESULT: cancel_at_period_end=true, status=${subscription.status}, sub=${subscriptionId}`);
       
       res.json({ 
         ok: true, 
         cancelAtPeriodEnd: true,
-        renewAt: subscription.current_period_end ? new Date(subscription.current_period_end * 1000).toISOString() : null
+        renewAt: subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null
       });
     } catch (error) {
-      console.error('Error canceling subscription:', error);
+      console.error(`billing> ERROR canceling subscription: ${error}`);
       res.status(500).json({ error: 'Failed to cancel subscription' });
     }
   });
@@ -1416,7 +1462,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const line = invoice.lines.data[0];
           
           // Path 1: line.price.id (standard)
-          priceId = line.price?.id;
+          priceId = (line as any).price?.id;
           
           // Path 2: line.pricing.price_details.price (new format seen in logs)
           if (!priceId && (line as any).pricing?.price_details?.price) {
@@ -1457,7 +1503,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               expand: ['items.data.price']
             });
             priceId = subscription.items.data[0]?.price.id || null;
-            periodEnd = subscription.current_period_end || null;
+            periodEnd = (subscription as any).current_period_end || null;
           } catch (error) {
             console.log(`billing> Could not expand subscription: ${error}`);
           }
@@ -1468,7 +1514,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         customerId = session.customer as string;
 
         // Try line_items first
-        if (session.line_items?.data?.length > 0) {
+        if (session.line_items?.data && session.line_items.data.length > 0) {
           const lineItem = session.line_items.data[0];
           priceId = lineItem.price?.id || null;
           quantity = lineItem.quantity || 1;
@@ -1481,11 +1527,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
               expand: ['line_items.data.price', 'subscription', 'subscription.items.data.price']
             });
             
-            if (expandedSession.line_items?.data?.length > 0) {
+            if (expandedSession.line_items?.data && expandedSession.line_items.data.length > 0) {
               priceId = expandedSession.line_items.data[0].price?.id || null;
             } else if (expandedSession.subscription && typeof expandedSession.subscription === 'object') {
               priceId = expandedSession.subscription.items?.data[0]?.price.id || null;
-              periodEnd = expandedSession.subscription.current_period_end || null;
+              periodEnd = (expandedSession.subscription as any).current_period_end || null;
             }
           } catch (error) {
             console.log(`billing> Could not expand checkout session: ${error}`);
@@ -1513,15 +1559,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
         case 'checkout.session.completed': {
           const session = event.data.object as Stripe.Checkout.Session;
           const userId = session.metadata?.userId;
+          const subscriptionId = session.subscription as string;
           
           if (context.customerId && userId) {
-            await storage.updateUserStripeInfo(userId, context.customerId);
+            // Update user with customer ID and subscription ID
+            await db
+              .update(users)
+              .set({
+                stripeCustomerId: context.customerId,
+                stripeSubscriptionId: subscriptionId,
+                updatedAt: new Date()
+              })
+              .where(eq(users.id, userId));
+              
             await storage.createStripeEvent({
               id: event.id,
               type: event.type,
               payload: event as any
             });
-            console.log(`billing> CHECKOUT: linked customer ${context.customerId} to user ${userId}`);
+            console.log(`billing> CHECKOUT: linked customer ${context.customerId} sub=${subscriptionId} to user ${userId}`);
           } else {
             console.log(`billing> SKIPPED: missing customer or user data`);
           }
@@ -1631,15 +1687,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 .from(users)
                 .where(eq(users.id, user.id));
 
+              // Build update object
+              const updateData: any = {
+                creditsRemaining: (currentUser?.creditsRemaining || 0) + credits,
+                activePlan: matchedPlan,
+                creditsRenewAt: renewAt,
+                updatedAt: new Date()
+              };
+              
+              // Only update subscription ID if we have one and user doesn't have it already
+              if (context.subscriptionId && !user.stripeSubscriptionId) {
+                updateData.stripeSubscriptionId = context.subscriptionId;
+              }
+              
               await tx
                 .update(users)
-                .set({ 
-                  creditsRemaining: (currentUser?.creditsRemaining || 0) + credits,
-                  activePlan: matchedPlan,
-                  creditsRenewAt: renewAt,
-                  stripeSubscriptionId: context.subscriptionId,
-                  updatedAt: new Date()
-                })
+                .set(updateData)
                 .where(eq(users.id, user.id));
 
               // Add entry to credits ledger
@@ -1681,6 +1744,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         case 'customer.subscription.deleted': {
           const subscription = event.data.object as Stripe.Subscription;
           const customerId = subscription.customer as string;
+          const subscriptionId = subscription.id;
+          
+          console.log(`billing> SUBSCRIPTION DELETED: sub=${subscriptionId} customer=${customerId}`);
           
           if (customerId) {
             const user = await storage.getUserByStripeCustomerId(customerId);
@@ -1695,6 +1761,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   updatedAt: new Date()
                 })
                 .where(eq(users.id, user.id));
+              
+              // Optional: Add ledger entry for subscription cancellation
+              await db.insert(creditsLedger).values({
+                userId: user.id,
+                delta: 0,
+                reason: 'subscription_cancelled'
+              });
               
               await storage.createStripeEvent({
                 id: event.id,
