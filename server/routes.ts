@@ -1384,6 +1384,109 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // POST /api/billing/resume - Resume canceled subscription
+  app.post('/api/billing/resume', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      console.log(`billing> RESUME REQUEST: userId=${userId}`);
+      
+      const [user] = await db
+        .select({
+          stripeCustomerId: users.stripeCustomerId,
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          activePlan: users.activePlan
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user || !user.stripeCustomerId) {
+        console.log(`billing> ERROR: Missing stripe customer for user ${userId}`);
+        return res.status(400).json({ error: 'Missing stripe customer' });
+      }
+      
+      console.log(`billing> RESUME REQUEST: customerId=${user.stripeCustomerId}, subscriptionId=${user.stripeSubscriptionId}`);
+      
+      let subscriptionId = user.stripeSubscriptionId;
+      
+      // Fallback: if no subscription ID stored, find it via customer
+      if (!subscriptionId) {
+        console.log(`billing> No subscriptionId stored, searching by customer...`);
+        try {
+          const subscriptions = await stripe.subscriptions.list({
+            customer: user.stripeCustomerId,
+            status: 'active',
+            limit: 1
+          });
+          
+          if (subscriptions.data.length === 0) {
+            // Try other statuses
+            const allSubs = await stripe.subscriptions.list({
+              customer: user.stripeCustomerId,
+              status: 'all',
+              limit: 10
+            });
+            
+            const activeSub = allSubs.data.find(sub => 
+              ['active', 'trialing', 'past_due', 'unpaid'].includes(sub.status)
+            );
+            
+            if (!activeSub) {
+              console.log(`billing> ERROR: No active subscription found for customer ${user.stripeCustomerId}`);
+              return res.status(404).json({ error: 'No active subscription on Stripe' });
+            }
+            
+            subscriptionId = activeSub.id;
+          } else {
+            subscriptionId = subscriptions.data[0].id;
+          }
+          
+          console.log(`billing> FALLBACK: Found subscription ${subscriptionId}`);
+        } catch (error) {
+          console.error(`billing> ERROR finding subscription: ${error}`);
+          return res.status(404).json({ error: 'No active subscription on Stripe' });
+        }
+      }
+      
+      // First retrieve current subscription status
+      const currentSubscription = await stripe.subscriptions.retrieve(subscriptionId);
+      
+      // Check if not scheduled for cancellation
+      if (!currentSubscription.cancel_at_period_end) {
+        console.log(`billing> RESUME: sub=${subscriptionId} notScheduledForCancellation=true`);
+        return res.json({ 
+          ok: true, 
+          resumed: true,
+          cancelAtPeriodEnd: false,
+          message: 'Subscription was not scheduled for cancellation'
+        });
+      }
+      
+      // Check if subscription is resumable
+      if (!['active', 'trialing', 'past_due', 'unpaid'].includes(currentSubscription.status)) {
+        console.log(`billing> ERROR: Subscription ${subscriptionId} not resumable, status=${currentSubscription.status}`);
+        return res.status(409).json({ error: 'Subscription not resumable' });
+      }
+      
+      // Resume subscription by removing cancel_at_period_end
+      const subscription = await stripe.subscriptions.update(subscriptionId, {
+        cancel_at_period_end: false
+      });
+      
+      const renewAt = subscription.current_period_end ? new Date((subscription as any).current_period_end * 1000).toISOString() : null;
+      console.log(`billing> RESUME: sub=${subscriptionId} resumed=true renewAt=${renewAt}`);
+      
+      res.json({ 
+        ok: true, 
+        resumed: true,
+        cancelAtPeriodEnd: false,
+        renewAt: renewAt
+      });
+    } catch (error) {
+      console.error(`billing> ERROR resuming subscription: ${error}`);
+      res.status(500).json({ error: 'Failed to resume subscription' });
+    }
+  });
+
   // POST /api/billing/checkout - Create Stripe checkout session
   app.post('/api/billing/checkout', isAuthenticated, async (req: Request, res: Response) => {
     try {

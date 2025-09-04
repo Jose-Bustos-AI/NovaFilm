@@ -173,6 +173,34 @@ export function AccountPage() {
     }
   });
 
+  // Resume subscription mutation
+  const resumeSubscriptionMutation = useMutation({
+    mutationFn: () => apiRequest('POST', '/api/billing/resume', {}),
+    onSuccess: (response: any) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/billing/subscription'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
+      
+      if (response.resumed) {
+        toast({
+          title: "Suscripción reanudada",
+          description: "Tu suscripción continuará renovándose automáticamente. Se mantendrán todos tus créditos."
+        });
+      } else {
+        toast({
+          title: "Suscripción activa",
+          description: "Tu suscripción no estaba programada para cancelarse."
+        });
+      }
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error.message || "Error al reanudar la suscripción",
+        variant: "destructive"
+      });
+    }
+  });
+
   // Logout mutation
   const logoutMutation = useMutation({
     mutationFn: () => apiRequest('POST', '/api/auth/logout', {}),
@@ -658,32 +686,73 @@ export function AccountPage() {
                   }
                 </p>
               )}
-              {subscription.status === 'active' && !subscription.cancelAtPeriodEnd && (
+              
+              {/* Show warning message when subscription is set to cancel */}
+              {subscription.cancelAtPeriodEnd && subscription.renewAt && (
                 <div className="pt-2">
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button variant="outline" size="sm" data-testid="button-cancel-subscription">
-                        Cancelar Suscripción
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>¿Cancelar suscripción?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos actuales y podrás seguir usándolos.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>No, mantener</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={() => cancelSubscriptionMutation.mutate()}
-                          disabled={cancelSubscriptionMutation.isPending}
-                        >
-                          {cancelSubscriptionMutation.isPending ? 'Cancelando...' : 'Sí, cancelar'}
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
+                  <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+                    <p className="text-sm text-yellow-800 dark:text-yellow-200">
+                      <strong>⚠️ Cancelación programada:</strong> Tu suscripción se cancelará el {new Date(subscription.renewAt).toLocaleDateString('es-ES')}. Puedes reanudarla antes de esa fecha.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {subscription.status === 'active' && (
+                <div className="pt-2 space-y-2">
+                  {!subscription.cancelAtPeriodEnd ? (
+                    // Show Cancel button when not scheduled for cancellation
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button variant="outline" size="sm" data-testid="button-cancel-subscription">
+                          Cancelar Suscripción
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>¿Cancelar suscripción?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos actuales y podrás seguir usándolos.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>No, mantener</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => cancelSubscriptionMutation.mutate()}
+                            disabled={cancelSubscriptionMutation.isPending}
+                          >
+                            {cancelSubscriptionMutation.isPending ? 'Cancelando...' : 'Sí, cancelar'}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  ) : (
+                    // Show Resume button when scheduled for cancellation
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button variant="secondary" size="sm" data-testid="button-resume-subscription">
+                          Reanudar Suscripción
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>¿Reanudar suscripción?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Tu suscripción continuará renovándose automáticamente y no se cancelará al final del período actual.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>No, mantener cancelación</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => resumeSubscriptionMutation.mutate()}
+                            disabled={resumeSubscriptionMutation.isPending}
+                          >
+                            {resumeSubscriptionMutation.isPending ? 'Reanudando...' : 'Sí, reanudar'}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  )}
                 </div>
               )}
             </div>
