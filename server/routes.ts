@@ -1231,6 +1231,91 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // GET /api/billing/subscription - Get current subscription status
+  app.get('/api/billing/subscription', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      
+      const [user] = await db
+        .select({
+          activePlan: users.activePlan,
+          creditsRenewAt: users.creditsRenewAt,
+          stripeSubscriptionId: users.stripeSubscriptionId
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      let status = 'none';
+      let cancelAtPeriodEnd = false;
+      
+      if (user.activePlan) {
+        status = 'active';
+        
+        // Check with Stripe if subscription is set to cancel
+        if (user.stripeSubscriptionId) {
+          try {
+            const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+            cancelAtPeriodEnd = subscription.cancel_at_period_end || false;
+            if (cancelAtPeriodEnd) {
+              status = 'canceled';
+            }
+          } catch (error) {
+            console.log(`billing> Could not check subscription status: ${error}`);
+          }
+        }
+      }
+      
+      res.json({
+        activePlan: user.activePlan,
+        renewAt: user.creditsRenewAt?.toISOString() || null,
+        status,
+        cancelAtPeriodEnd
+      });
+    } catch (error) {
+      console.error('Error fetching subscription:', error);
+      res.status(500).json({ error: 'Failed to fetch subscription' });
+    }
+  });
+
+  // POST /api/billing/cancel - Cancel subscription
+  app.post('/api/billing/cancel', isAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      
+      const [user] = await db
+        .select({
+          stripeSubscriptionId: users.stripeSubscriptionId,
+          activePlan: users.activePlan
+        })
+        .from(users)
+        .where(eq(users.id, userId));
+      
+      if (!user || !user.stripeSubscriptionId) {
+        return res.status(400).json({ error: 'No active subscription found' });
+      }
+      
+      // Cancel subscription at period end in Stripe
+      const subscription = await stripe.subscriptions.update(user.stripeSubscriptionId, {
+        cancel_at_period_end: true
+      });
+      
+      console.log(`billing> SUBSCRIPTION CANCELLED AT PERIOD END: sub=${user.stripeSubscriptionId} user=${userId}`);
+      
+      res.json({ 
+        ok: true, 
+        cancelAtPeriodEnd: true,
+        renewAt: subscription.current_period_end ? new Date(subscription.current_period_end * 1000).toISOString() : null
+      });
+    } catch (error) {
+      console.error('Error canceling subscription:', error);
+      res.status(500).json({ error: 'Failed to cancel subscription' });
+    }
+  });
+
   // POST /api/billing/checkout - Create Stripe checkout session
   app.post('/api/billing/checkout', isAuthenticated, async (req: Request, res: Response) => {
     try {
@@ -1552,6 +1637,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   creditsRemaining: (currentUser?.creditsRemaining || 0) + credits,
                   activePlan: matchedPlan,
                   creditsRenewAt: renewAt,
+                  stripeSubscriptionId: context.subscriptionId,
                   updatedAt: new Date()
                 })
                 .where(eq(users.id, user.id));
@@ -1571,7 +1657,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
               });
             });
             
-            console.log(`billing> APPLIED: +${credits} plan=${matchedPlan} renewAt=${renewAt.toISOString()} user=${user.id} invoice=${invoiceId}`);
+            console.log(`billing> PLAN SET: plan=${matchedPlan} renewAt=${renewAt.toISOString()} sub=${context.subscriptionId} user=${user.id}`);
+            console.log(`billing> APPLIED: +${credits} credits for invoice=${invoiceId}`);
           } catch (error) {
             console.error(`billing> ERROR applying credits: ${error}`);
             return res.status(500).json({ error: 'Failed to apply credits' });
@@ -1598,13 +1685,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (customerId) {
             const user = await storage.getUserByStripeCustomerId(customerId);
             if (user) {
-              await storage.updateUserStripeInfo(user.id, customerId, undefined);
+              // Clear active plan but don't touch existing credits
+              await db
+                .update(users)
+                .set({
+                  activePlan: null,
+                  creditsRenewAt: null,
+                  stripeSubscriptionId: null,
+                  updatedAt: new Date()
+                })
+                .where(eq(users.id, user.id));
+              
               await storage.createStripeEvent({
                 id: event.id,
                 type: event.type,
                 payload: event as any
               });
-              console.log(`billing> SUB CANCELLED user=${user.id}`);
+              console.log(`billing> PLAN CLEARED (subscription deleted) user=${user.id}`);
             } else {
               console.log(`billing> SKIPPED: no user for cancelled customer ${customerId}`);
             }

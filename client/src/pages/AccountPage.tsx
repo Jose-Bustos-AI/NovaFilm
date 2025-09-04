@@ -47,6 +47,13 @@ interface BillingPlan {
   credits: number;
 }
 
+interface SubscriptionData {
+  activePlan: string | null;
+  renewAt: string | null;
+  status: 'active' | 'canceled' | 'none';
+  cancelAtPeriodEnd: boolean;
+}
+
 export function AccountPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -67,6 +74,11 @@ export function AccountPage() {
   // Fetch user profile
   const { data: profile, isLoading: profileLoading, error: profileError } = useQuery<UserProfile>({
     queryKey: ['/api/account/me']
+  });
+
+  // Fetch subscription data
+  const { data: subscription, isLoading: subscriptionLoading } = useQuery<SubscriptionData>({
+    queryKey: ['/api/billing/subscription']
   });
 
   // Update form when profile loads
@@ -135,18 +147,19 @@ export function AccountPage() {
 
   // Cancel subscription mutation
   const cancelSubscriptionMutation = useMutation({
-    mutationFn: () => apiRequest('POST', '/api/account/subscription/cancel', {}),
+    mutationFn: () => apiRequest('POST', '/api/billing/cancel', {}),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/billing/subscription'] });
       queryClient.invalidateQueries({ queryKey: ['/api/account/me'] });
       toast({
         title: "Suscripción cancelada",
-        description: "Tu suscripción ha sido cancelada. Mantienes acceso hasta fin de ciclo."
+        description: "Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos."
       });
     },
-    onError: () => {
+    onError: (error: any) => {
       toast({
         title: "Error",
-        description: "No se pudo cancelar la suscripción. Intenta de nuevo.",
+        description: error.message || "Error al cancelar la suscripción",
         variant: "destructive"
       });
     }
@@ -622,12 +635,53 @@ export function AccountPage() {
       <div className="space-y-6">
         <div>
           <h2 className="text-2xl font-bold mb-2">Planes y Suscripción</h2>
-          <p className="text-muted-foreground">
-            {profile?.activePlan ? 
-              `Plan activo: ${profile.activePlan.toUpperCase()}` : 
-              'Sin suscripción activa'
-            }
-          </p>
+          {subscriptionLoading ? (
+            <p className="text-muted-foreground">Cargando información de suscripción...</p>
+          ) : subscription?.activePlan ? (
+            <div className="space-y-2">
+              <p className="text-muted-foreground">
+                Plan activo: <span className="font-medium capitalize">{subscription.activePlan}</span>
+              </p>
+              {subscription.renewAt && (
+                <p className="text-sm text-muted-foreground">
+                  {subscription.cancelAtPeriodEnd ? 
+                    `Se cancelará el ${new Date(subscription.renewAt).toLocaleDateString('es-ES')}` :
+                    `Renueva el ${new Date(subscription.renewAt).toLocaleDateString('es-ES')}`
+                  }
+                </p>
+              )}
+              {subscription.status === 'active' && !subscription.cancelAtPeriodEnd && (
+                <div className="pt-2">
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="outline" size="sm" data-testid="button-cancel-subscription">
+                        Cancelar Suscripción
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>¿Cancelar suscripción?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Tu suscripción se cancelará al final del período actual. Conservarás todos tus créditos actuales y podrás seguir usándolos.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>No, mantener</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={() => cancelSubscriptionMutation.mutate()}
+                          disabled={cancelSubscriptionMutation.isPending}
+                        >
+                          {cancelSubscriptionMutation.isPending ? 'Cancelando...' : 'Sí, cancelar'}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-muted-foreground">Sin suscripción activa</p>
+          )}
         </div>
 
         {plansLoading ? (
@@ -638,7 +692,7 @@ export function AccountPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {billingPlans?.map((plan) => (
               <Card key={plan.key} className={`relative ${
-                profile?.activePlan === plan.key ? 'ring-2 ring-primary' : ''
+                subscription?.activePlan === plan.key ? 'ring-2 ring-primary' : ''
               }`}>
                 {plan.key === 'pro' && (
                   <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
@@ -665,7 +719,7 @@ export function AccountPage() {
                     </div>
                   </div>
                   
-                  {profile?.activePlan === plan.key ? (
+                  {subscription?.activePlan === plan.key ? (
                     <Button variant="outline" disabled className="w-full" data-testid={`button-current-plan-${plan.key}`}>
                       Plan Actual
                     </Button>

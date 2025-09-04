@@ -37,6 +37,7 @@ export const users = pgTable("users", {
   creditsRemaining: integer("credits_remaining").notNull().default(0),
   subscriptionStatus: text("subscription_status").default('inactive'), // 'inactive' | 'trialing' | 'active' | 'canceled'
   stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
   activePlan: text("active_plan"), // 'basic' | 'pro' | 'max' | null
   creditsRenewAt: timestamp("credits_renew_at"),
   canceledAt: timestamp("canceled_at"),
