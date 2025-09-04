@@ -268,14 +268,37 @@ export function AccountPage() {
 
   // Checkout mutation
   const checkoutMutation = useMutation({
-    mutationFn: (planKey: string) => apiRequest('POST', '/api/billing/checkout', { planKey }),
-    onSuccess: (data: { url: string }) => {
-      window.location.href = data.url;
+    mutationFn: async (planKey: string) => {
+      const response = await apiRequest('POST', '/api/billing/checkout', { planKey });
+      return response.json();
     },
-    onError: () => {
+    onSuccess: (data: { url: string }) => {
+      if (data?.url) {
+        window.location.assign(data.url);
+      } else {
+        toast({
+          title: "Error",
+          description: "No se pudo obtener la URL de pago.",
+          variant: "destructive",
+        });
+      }
+    },
+    onError: (error: any) => {
+      console.error("Checkout error:", error);
+      
+      let message = "No se pudo crear la sesión de pago.";
+      
+      if (error?.message?.includes('401')) {
+        message = "Inicia sesión para suscribirte.";
+      } else if (error?.message?.includes('400')) {
+        message = "Precio inválido o faltan datos.";
+      } else if (error?.message?.includes('500')) {
+        message = "No se pudo iniciar el pago. Inténtalo de nuevo.";
+      }
+      
       toast({
         title: "Error",
-        description: "No se pudo crear la sesión de pago.",
+        description: message,
         variant: "destructive",
       });
     }
@@ -654,7 +677,7 @@ export function AccountPage() {
                       data-testid={`button-subscribe-${plan.key}`}
                     >
                       <CreditCard className="h-4 w-4 mr-2" />
-                      {checkoutMutation.isPending ? 'Procesando...' : 'Suscribirme'}
+                      {checkoutMutation.isPending ? 'Redirigiendo a Stripe...' : 'Suscribirme'}
                     </Button>
                   )}
                 </CardContent>

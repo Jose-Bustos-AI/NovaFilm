@@ -1275,8 +1275,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             quantity: 1,
           }
         ],
-        success_url: `${process.env.APP_BASE_URL}/account?status=success`,
-        cancel_url: `${process.env.APP_BASE_URL}/account?status=cancel`,
+        success_url: `${process.env.APP_BASE_URL}account?status=success`,
+        cancel_url: `${process.env.APP_BASE_URL}account?status=cancel`,
         metadata: {
           planKey,
           userId

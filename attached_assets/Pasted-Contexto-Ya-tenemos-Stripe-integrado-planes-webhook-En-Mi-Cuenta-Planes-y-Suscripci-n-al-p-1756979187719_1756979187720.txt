@@ -1,0 +1,107 @@
+Contexto
+
+Ya tenemos Stripe integrado (planes + webhook).
+
+En Mi Cuenta → Planes y Suscripción, al pulsar Suscribirme debería abrirse Stripe Checkout, pero en su lugar navega a una ruta del frontend y muestra un 404.
+
+Causa típica: el handler del botón hace navegación (p. ej. navigate('/api/billing/checkout?...')) en vez de fetch POST + window.location.href a la session.url retornada.
+
+🛡️ Regla de Oro
+
+No romper nada de lo que ya funciona (webhooks, créditos, planes, DB). Solo tocar lo necesario para que el checkout redirija correctamente a Stripe desde el botón, con buen manejo de errores y loading.
+
+✅ Instrucciones (exactas y paso a paso)
+
+Frontend – Cambiar el handler del botón “Suscribirme”
+
+Ubicación: el componente de Planes y Suscripción en “Mi Cuenta”.
+
+Reemplazar cualquier navigate('/api/billing/checkout…') o <a href="/api/billing/checkout…"> por una llamada fetch POST:
+
+POST /api/billing/checkout
+
+Headers: Content-Type: application/json
+
+Body: { "priceId": "<price_id seleccionado>" }
+
+Esperar respuesta 200 con JSON { url: "https://checkout.stripe.com/..." }.
+
+Si llega url, hacer window.location.assign(url) (o window.location.href = url).
+
+Añadir loading state en el botón (deshabilitar durante la petición) y toasts/mensajes para:
+
+401 → “Inicia sesión para suscribirte”.
+
+400 → “Precio inválido o faltan datos”.
+
+500 → “No se pudo iniciar el pago. Inténtalo de nuevo”.
+
+Evitar doble click mientras está cargando.
+
+Backend – Asegurar contrato del endpoint
+
+Endpoint: POST /api/billing/checkout (ya existe; solo verificar).
+
+Debe:
+
+Validar sesión (si no, 401 JSON).
+
+Leer priceId del body (no query). Si falta → 400 JSON.
+
+Crear Checkout Session de Stripe en modo subscription con:
+
+mode: 'subscription'
+
+line_items: [{ price: priceId, quantity: 1 }]
+
+success_url: ${APP_BASE_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}
+
+cancel_url: ${APP_BASE_URL}/account?canceled=1
+
+client_reference_id: user.id
+
+customer_email: user.email (si está disponible)
+
+No hacer redirects del servidor. Responder JSON { url: session.url }.
+
+Si el endpoint ya hacía res.redirect(session.url), cámbialo a res.json({ url: session.url }) (para que el router del frontend no intercepte nada).
+
+URLs y ENV (comprobación rápida)
+
+En el backend, APP_BASE_URL debe apuntar a tu URL de la app (replit) sin trailing slash.
+
+success_url y cancel_url deben ser absolutas (como arriba), no relativas.
+
+Los priceId del frontend deben venir de /api/billing/plans (o del mapping backend) para que coincidan con los STRIPE_PRICE_* actuales.
+
+Verificación
+
+Abrir DevTools → pestaña Network.
+
+Click en “Suscribirme”:
+
+Ver que se hace POST a /api/billing/checkout (no una navegación).
+
+Respuesta 200 con { url: ... }.
+
+El navegador redirige a Stripe (no aparece tu 404).
+
+Completar pago de prueba → volver a la app (success URL) → comprobar créditos y plan activo.
+
+Manejo de errores (UX)
+
+Si el POST falla, mostrar un aviso claro y dejar el botón disponible otra vez.
+
+Si el servidor responde sin url, mostrar: “No se pudo iniciar el pago. Inténtalo en unos minutos.”
+
+Notas rápidas de diagnóstico (por si algo persiste)
+
+Si sigues viendo el 404, casi seguro el botón sigue intentando navegar a una ruta local (router) en vez de hacer fetch.
+
+Confirma que el endpoint devuelve JSON y no redirige.
+
+Si no llega a Stripe y en Network ves un GET /api/billing/checkout (y no un POST), el handler está mal.
+
+Si el POST da 401, tienes que loguearte antes.
+
+Si el POST da 200 pero sin url, revisa logs del servidor (Stripe pudo lanzar un error creando la sesión; revisa STRIPE_SECRET_KEY, priceId).
